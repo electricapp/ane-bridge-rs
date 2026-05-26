@@ -1,0 +1,6 @@
+build/
+rust/target/
+**/*.o
+**/*.dylib
+**/Cargo.lock
+.DS_Store

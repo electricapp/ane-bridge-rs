@@ -1,0 +1,22 @@
+# ThreadSanitizer suppressions for ane-bridge.
+#
+# Apple's private AppleNeuralEngine.framework is not TSAN-instrumented.
+# Any race report that originates entirely within it is uninstrumented
+# noise and cannot be fixed from our side, so we suppress reports
+# rooted in those frames.
+#
+# Format: <category>:<symbol_or_pattern>
+# Docs: https://clang.llvm.org/docs/ThreadSanitizer.html#runtime-flags
+
+# Framework-internal locks/atomics.
+race:_ANEClient*
+race:_ANEInMemoryModel*
+race:_ANECompiler*
+race:AppleNeuralEngine*
+
+# Foundation NSError / NSString / NSDictionary internals — these are
+# Apple's framework code, not ours.
+race:CFRetain
+race:CFRelease
+race:_objc_*
+race:objc_*

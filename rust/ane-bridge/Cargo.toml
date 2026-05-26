@@ -1,0 +1,46 @@
+[package]
+name          = "ane-bridge"
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+documentation = { workspace = true }
+authors       = { workspace = true }
+keywords      = { workspace = true }
+categories    = { workspace = true }
+readme        = "../../README.md"
+description   = "Safe Rust wrapper for ane-bridge — Apple Neural Engine dispatch."
+
+[package.metadata.docs.rs]
+default-target = "aarch64-apple-darwin"
+targets        = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+rustdoc-args   = ["--cfg", "docsrs"]
+
+[dependencies]
+ane-bridge-sys = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1"
+
+# `loom` provides instrumented atomic/Mutex/thread primitives for the
+# `tests/loom_async.rs` model. Enabled only under `--cfg loom`.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
+[lints]
+workspace = true
+
+[[example]]
+name = "identity"
+path = "examples/identity.rs"
+
+[[example]]
+name = "zero_copy"
+path = "examples/zero_copy.rs"
+
+[[example]]
+name = "async_runner"
+path = "examples/async_runner.rs"

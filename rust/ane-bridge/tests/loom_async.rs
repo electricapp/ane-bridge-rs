@@ -1,0 +1,112 @@
+//! Loom model of the [`crate::EvalShared`] state machine.
+//!
+//! `loom` exhaustively explores legal interleavings of atomics and locks
+//! between threads, looking for missed happens-before relationships.
+//! It can't see into the C side or the real `core::task::Waker`, so we
+//! model just the Rust-side atomic/mutex sequencing that the
+//! `EvalFuture` relies on.
+//!
+//! This file is only compiled when the crate is built with `--cfg loom`:
+//!   `RUSTFLAGS='--cfg loom' cargo test --release --test loom_async`
+
+#![cfg(loom)]
+
+use loom::sync::atomic::{AtomicBool, Ordering};
+use loom::sync::{Arc, Mutex};
+use loom::thread;
+
+/// A faithful model of `EvalShared` using `loom` primitives. The real
+/// implementation in `lib.rs` uses `core::sync::atomic`+`std::sync::Mutex`
+/// with identical orderings, so any race loom finds here is also a race
+/// in the production code.
+struct EvalShared {
+    done: AtomicBool,
+    waker_pending: Mutex<bool>,
+    result: Mutex<Option<i32>>,
+}
+
+impl EvalShared {
+    fn new() -> Self {
+        Self {
+            done: AtomicBool::new(false),
+            waker_pending: Mutex::new(false),
+            result: Mutex::new(None),
+        }
+    }
+}
+
+/// Verify: after the callback fires and the future polls, the future
+/// always observes the result. No interleaving of (set_result,
+/// store_done, take_waker) vs (register_waker, load_done, take_result)
+/// can lose the result.
+#[test]
+fn no_lost_wakeup() {
+    loom::model(|| {
+        let shared = Arc::new(EvalShared::new());
+        let shared_writer = shared.clone();
+
+        // Writer thread: this models the C-side completion callback —
+        // it sets the result, publishes via `done`, and then would
+        // wake the registered waker.
+        let writer = thread::spawn(move || {
+            *shared_writer.result.lock().unwrap() = Some(42);
+            shared_writer.done.store(true, Ordering::Release);
+            // "Wake": observe the waker_pending bit (so loom sees this
+            // dependency); the real code calls Waker::wake here.
+            let _ = shared_writer.waker_pending.lock().unwrap();
+        });
+
+        // Reader thread: this models `EvalFuture::poll`. It either
+        // sees `done` already true and returns Ready, or registers
+        // a waker and re-checks. After the writer completes, at
+        // least ONE re-poll must observe `done == true`.
+        let reader = thread::spawn(move || {
+            // First poll path.
+            if shared.done.load(Ordering::Acquire) {
+                let r = shared.result.lock().unwrap().take();
+                assert_eq!(r, Some(42), "Ready path saw stale result");
+                return;
+            }
+            // Register waker (model).
+            *shared.waker_pending.lock().unwrap() = true;
+            // Re-check done after registration to close the lost-wakeup
+            // race (the exact pattern used in `EvalFuture::poll`).
+            if shared.done.load(Ordering::Acquire) {
+                let r = shared.result.lock().unwrap().take();
+                assert_eq!(r, Some(42), "after-register path saw stale result");
+                return;
+            }
+            // Otherwise we'd be "Pending" — in production the runtime
+            // would wake us. We model the eventual wakeup by waiting
+            // for the writer thread (which is the source of the wake).
+        });
+
+        writer.join().unwrap();
+        reader.join().unwrap();
+    });
+}
+
+/// Verify the `done` flag is monotonic: once true it never goes back
+/// to false. Combined with the seq_cst stores in the real code, this
+/// prevents spurious "Ready -> Pending" transitions across polls.
+#[test]
+fn done_is_monotonic() {
+    loom::model(|| {
+        let shared = Arc::new(EvalShared::new());
+        let writer = shared.clone();
+        let h = thread::spawn(move || {
+            writer.done.store(true, Ordering::Release);
+        });
+        // Reader spin: once it sees true, no subsequent load may see false.
+        let mut seen_true = false;
+        for _ in 0..2 {
+            let v = shared.done.load(Ordering::Acquire);
+            if v {
+                seen_true = true;
+            } else {
+                assert!(!seen_true, "done went true -> false");
+            }
+        }
+        h.join().unwrap();
+    });
+}

@@ -1,0 +1,59 @@
+name: fuzz-soak
+
+# Long-soak fuzz run. Manually triggerable from the Actions tab; the
+# `cases` input controls how many proptest cases each of the six
+# parser properties explores (default 100_000 each).
+#
+# Not wired to `push` or `pull_request` — this is meant as a "before
+# release" or "after a parser change" check. Each property runs in
+# ~10–30 minutes at 100k cases.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: "ANE_FUZZ_CASES per property"
+        required: false
+        default: "100000"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  soak:
+    name: parser_fuzz soak (cases=${{ github.event.inputs.cases }})
+    runs-on: macos-14
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-soak-${{ hashFiles('rust/**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: cargo build (release)
+        working-directory: rust
+        run: cargo build --release --workspace --tests
+
+      - name: parser_fuzz soak
+        working-directory: rust
+        env:
+          ANE_FUZZ_CASES: ${{ github.event.inputs.cases }}
+          # Keep heap guards on — soak runs are also where rare
+          # parser-corruption bugs would surface.
+          MallocGuardEdges: "1"
+          MallocScribble: "1"
+          MallocCheckHeapEach: "100"
+          MallocCheckHeapStart: "1"
+          MallocErrorAbort: "1"
+        run: cargo test --release --workspace --test parser_fuzz -- --nocapture

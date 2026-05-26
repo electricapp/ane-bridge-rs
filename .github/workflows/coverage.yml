@@ -1,0 +1,53 @@
+name: coverage
+
+# Source-based coverage report for the C/Obj-C parser
+# (`c/src/ane_bridge.m` + `c/src/ane_private.m`). Manually
+# triggerable; uploads the HTML report as an artifact and prints
+# the text summary in the job log.
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: C parser coverage (LLVM source-based)
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-cov-${{ hashFiles('rust/**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Show toolchain
+        run: |
+          xcrun llvm-cov --version
+          xcrun llvm-profdata --version
+
+      - name: Generate coverage report
+        run: scripts/coverage.sh parser_fuzz corpus
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: parser-coverage-html
+          path: target/coverage/html
+
+      - name: Upload text summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: parser-coverage-summary
+          path: target/coverage/report.txt

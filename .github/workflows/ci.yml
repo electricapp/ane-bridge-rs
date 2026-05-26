@@ -1,0 +1,184 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  build-and-test:
+    name: build + test (macOS Apple Silicon)
+    # macos-14 and later are Apple Silicon (arm64) with ANE available.
+    runs-on: macos-14
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ----- Python (for the identity-model generator script) -----
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ----- Rust toolchain -----
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Show toolchain
+        run: |
+          uname -a
+          sw_vers
+          rustc --version
+          cargo --version
+          python3 --version
+          xcrun clang --version
+
+      # ----- Cargo cache -----
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/**/Cargo.lock', 'rust/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # ----- C library + example build -----
+      - name: Build dylib + C examples
+        run: |
+          make
+          make examples
+
+      - name: Generate identity model fixture
+        run: python3 tools/make_identity_model.py build/identity
+
+      - name: Run C identity example
+        run: ./build/bin/identity build/identity/model.mil build/identity/weights.bin
+
+      - name: Run C zero-copy example
+        run: ./build/bin/zero_copy build/identity/model.mil build/identity/weights.bin
+
+      # ----- Rust formatting -----
+      - name: cargo fmt
+        working-directory: rust
+        run: cargo fmt --all -- --check
+
+      # ----- Rust clippy (max lints) -----
+      - name: cargo clippy
+        working-directory: rust
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Catches broken intra-doc links and undocumented unsafe items.
+      - name: cargo doc (warnings as errors)
+        working-directory: rust
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --workspace
+
+      # ----- Rust build + run examples + integration tests -----
+      - name: cargo build (release)
+        working-directory: rust
+        run: cargo build --workspace --release --all-targets
+
+      - name: Run Rust identity example
+        working-directory: rust
+        run: |
+          cargo run --release --example identity -- \
+            ../build/identity/model.mil ../build/identity/weights.bin
+
+      - name: Run Rust zero-copy example
+        working-directory: rust
+        run: |
+          cargo run --release --example zero_copy -- \
+            ../build/identity/model.mil ../build/identity/weights.bin
+
+      - name: Run Rust async example
+        working-directory: rust
+        run: |
+          cargo run --release --example async_runner -- \
+            ../build/identity/model.mil ../build/identity/weights.bin
+
+      - name: cargo test (release)
+        working-directory: rust
+        run: cargo test --release --workspace
+
+      # ----- Heap-guard runs to catch FFI memory bugs without nightly -----
+      #
+      # MallocGuardEdges places guard pages around every libsystem_malloc
+      # allocation; MallocScribble fills freed memory with 0x55 to catch
+      # use-after-free; MallocCheckHeapEach walks the heap every N malloc
+      # operations to detect corruption. These are macOS's built-in
+      # equivalents to a sanitizer pass and they cross the FFI boundary
+      # transparently — Apple's private framework allocations are also
+      # protected.
+      - name: cargo test under heap guards
+        working-directory: rust
+        env:
+          MallocGuardEdges: "1"
+          MallocScribble: "1"
+          MallocCheckHeapEach: "100"
+          MallocCheckHeapStart: "1"
+          MallocErrorAbort: "1"
+        run: cargo test --release --workspace --tests
+
+      # ----- loom: exhaustive interleaving check (Rust side) -----
+      #
+      # Exhaustively explores legal thread interleavings for the
+      # `EvalShared` state machine — the atomic+mutex protocol that
+      # `EvalFuture` and the completion callback share. Catches
+      # missed happens-before relationships and lost-wakeup bugs.
+      - name: cargo test under loom
+        working-directory: rust
+        env:
+          RUSTFLAGS: --cfg loom
+        run: cargo test --release --workspace --test loom_async
+
+      # ----- ThreadSanitizer (C side) -----
+      #
+      # Builds the C/Obj-C side with `-fsanitize=thread` and re-runs the
+      # race regression test + stress test under TSAN. Catches future
+      # regressions where someone introduces an unsynchronized global or
+      # write-without-fence in `c/src/`. Apple's private framework is
+      # NOT TSAN-built so reports originating inside it are filtered by
+      # the suppressions file in `c/tsan.supp`.
+      - name: cargo test under ThreadSanitizer
+        working-directory: rust
+        env:
+          ANE_BRIDGE_TSAN: "1"
+          TSAN_OPTIONS: "halt_on_error=1 suppressions=../c/tsan.supp second_deadlock_stack=1"
+        run: |
+          export DYLD_LIBRARY_PATH=$(clang --print-runtime-dir):$DYLD_LIBRARY_PATH
+          cargo clean -p ane-bridge-sys
+          cargo test --release --workspace --test race --test stress
+
+      # ----- macOS `leaks` against the stress binary -----
+      #
+      # `leaks --atExit -- <binary>` runs the process and reports any
+      # unfreed allocations at exit. We point it at the stress test
+      # binary so the create/destroy cycles are exercised; the test
+      # fails if any leak is reported.
+      - name: leaks check on stress tests
+        working-directory: rust
+        env:
+          MallocStackLogging: "1"
+        run: |
+          # Compile the stress test without running it, then locate the
+          # produced binary.
+          cargo test --release --workspace --test stress --no-run
+          STRESS_BIN=$(find target/release/deps -maxdepth 1 -type f -perm -111 \
+                      -name 'stress-*' ! -name '*.d' ! -name '*.dSYM' | head -n1)
+          if [ -z "$STRESS_BIN" ]; then
+            echo "could not find stress test binary" >&2
+            exit 1
+          fi
+          echo "running leaks against $STRESS_BIN"
+          # `leaks --atExit --` waits for the process to finish then
+          # scans. Exits non-zero if any leaks are found.
+          leaks --atExit --quiet -- "$STRESS_BIN" --test-threads=1
