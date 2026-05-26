@@ -9,8 +9,8 @@ Requires a recent macOS with the Xcode command line tools, Python 3.11+,
 and Rust 1.95+.
 
 ```bash
-git clone https://github.com/anthropics/ane-bridge
-cd ane-bridge
+git clone https://github.com/electricapp/ane-bridge-rs
+cd ane-bridge-rs
 
 # Build the dylib + C examples
 make
