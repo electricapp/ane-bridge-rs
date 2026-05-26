@@ -1,17 +1,18 @@
 # ane-bridge
 
-[![CI](https://github.com/anthropics/ane-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/anthropics/ane-bridge/actions/workflows/ci.yml)
+[![CI](https://github.com/electricapp/ane-bridge-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/electricapp/ane-bridge-rs/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/ane-bridge.svg)](https://crates.io/crates/ane-bridge)
 [![docs.rs](https://docs.rs/ane-bridge/badge.svg)](https://docs.rs/ane-bridge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)](https://www.apple.com/macos/)
 [![Rust 1.95+](https://img.shields.io/badge/Rust-1.95%2B-orange?logo=rust)](https://www.rust-lang.org/)
 
-A thin bridge from MIL text + weights to the Apple Neural Engine.
-Built on `AppleNeuralEngine.framework` (private), the same path CoreML
-uses when it offloads to ANE.
+Safe Rust bindings and C library for the Apple Neural Engine. A thin
+bridge from MIL text + weights to ANE, built on
+`AppleNeuralEngine.framework` (private), the same path CoreML uses
+when it offloads to ANE.
 
-- **C library** (`libane_bridge.dylib`) with a stable header (`ane_bridge.h`).
+- **Safe Rust bindings** + **C library** (`libane_bridge.dylib`) with a stable header (`ane_bridge.h`).
 - **Rust workspace**: `ane-bridge-sys` (raw FFI) + `ane-bridge` (safe wrapper).
 - **Schema derived from the framework** (via `modelAttributes`), not declared by the caller.
 - **Async**: `submit` + `wait` / poll / callback / `Future`; multiple in-flight requests per model.
