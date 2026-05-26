@@ -963,8 +963,12 @@ AneStatus ane_request_submit(AneRequest* r, AneQoS qos) {
 AneStatus ane_request_wait(AneRequest* r, int32_t timeout_ms) {
     clear_last_error();
     if (!r) { set_last_error("null request"); return ANE_ERR_INVALID_ARG; }
-    /* If nothing in flight and we already have a result, return last status. */
+    /* If nothing in flight and we already have a result, the semaphore
+     * was already signaled by the worker block.  Consume the signal so
+     * the count stays balanced — skipping this was a bug that caused
+     * stale semaphore counts to make later waits return prematurely. */
     if (atomic_load(&r->in_flight) == 0 && atomic_load(&r->has_result) == 1) {
+        dispatch_semaphore_wait(r->done_sem, DISPATCH_TIME_NOW);
         if (r->last_status != ANE_OK && r->last_err_msg[0] != '\0') {
             set_last_error("%s", r->last_err_msg);
         }
@@ -1014,9 +1018,11 @@ AneStatus ane_request_run(AneRequest* r, AneQoS qos) {
      *
      * We still go through the same `@autoreleasepool` discipline so
      * NSError objects + the request descriptor get released
-     * promptly, and we still update `in_flight` / `has_result` /
-     * `done_sem` so a concurrent `wait()` / `is_done()` sees the same
-     * state as the async path. */
+     * promptly, and we still update `in_flight` / `has_result` so a
+     * concurrent `is_done()` sees the correct state. We intentionally
+     * do NOT signal `done_sem` — run() is synchronous and no one is
+     * waiting; signaling would leak a semaphore count that breaks a
+     * subsequent submit()+wait() sequence. */
     AneStatus status;
     @autoreleasepool {
         AneStatus build_status = ANE_OK;
@@ -1025,7 +1031,10 @@ AneStatus ane_request_run(AneRequest* r, AneQoS qos) {
             r->last_status = build_status;
             atomic_store(&r->has_result, 1);
             atomic_store(&r->in_flight, 0);
-            dispatch_semaphore_signal(r->done_sem);
+            /* Do NOT signal done_sem — run() is synchronous, no one is
+             * waiting on the semaphore. Signaling would leak a count that
+             * causes a subsequent submit()+wait() to consume a stale
+             * signal and return before the eval actually completes. */
             return build_status;
         }
         unsigned int qos_v = (unsigned int)(qos ? qos : ANE_QOS_DEFAULT);
@@ -1044,7 +1053,6 @@ AneStatus ane_request_run(AneRequest* r, AneQoS qos) {
         r->last_status = status;
         atomic_store(&r->has_result, 1);
         atomic_store(&r->in_flight, 0);
-        dispatch_semaphore_signal(r->done_sem);
         AneCompletionFn cb = r->completion_fn;
         void* cb_user = r->completion_user;
         if (cb) cb(r, status, cb_user);
