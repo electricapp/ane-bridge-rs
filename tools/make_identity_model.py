@@ -1,3 +1,6 @@
+# /// script
+# requires-python = ">=3.11"
+# ///
 """Generate a trivial identity MIL model + (unused) weights blob for testing.
 
 Writes:

@@ -1,3 +1,10 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "torch>=2.2",
+#     "coremltools>=8.0",
+# ]
+# ///
 """Generate an ANE-friendly benchmark model and compile to .mlmodelc.
 
 Builds an 8-block conv stack in fp16 — the kind of compute-bound graph
