@@ -215,8 +215,7 @@ sources via the `cc` crate.
 
 ## Caveats
 
-- Uses Apple's **private** `AppleNeuralEngine.framework`. Not App Store safe.
-- macOS only. Apple Silicon required.
+- Uses Apple's **private** `AppleNeuralEngine.framework`.
 - MIL text is the input contract. No converter shipped — use `coremltools` or write MIL directly.
 - Weight references resolve against the `NSDictionary` passed at open — one entry per named blob.
 
