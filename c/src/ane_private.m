@@ -27,7 +27,7 @@ Class g_AneSharedEventsCls      = nil;
 Class g_AneSharedSignalEventCls = nil;
 Class g_AneSharedWaitEventCls   = nil;
 Class g_AneChainingRequestCls   = nil;
-Class g_AneProgramForEvalCls    = nil;
+Class g_AneDeviceInfoCls        = nil;
 
 static id stub_getUUID(id self, SEL _cmd) {
     (void)self; (void)_cmd;
@@ -39,17 +39,25 @@ static id stub_getUUID(id self, SEL _cmd) {
     return u;
 }
 
-/* Public: kept for back-compat with the header, but the actual install
- * happens inside `ane_private_load`'s once block. Calling this directly
- * after `ane_private_load` is a no-op. */
-void ane_private_install_uuid_stub(void) {
-    if (!g_AneInMemoryCls) return;
-    SEL sel = sel_registerName("getUUID");
-    if ([g_AneInMemoryCls instancesRespondToSelector:sel]) return;
-    /* `class_addMethod` itself is documented thread-safe in the
-     * Objective-C runtime, but we still gate it via the once block in
-     * `ane_private_load` so the call ordering is well-defined. */
-    class_addMethod(g_AneInMemoryCls, sel, (IMP)stub_getUUID, "@@:");
+/* `_ANEChainingRequest validate` calls -symbolIndex on every member
+ * of its `inputs:` and `outputSets:` arrays. None of the documented
+ * buffer wrapper classes carry that selector natively; instead, the
+ * framework expects callers to set a symbol index on each wrapper
+ * before passing it. We stash the index per-instance via an
+ * associated object and install a -symbolIndex getter at framework
+ * load time. */
+char g_ane_symbol_index_key;
+unsigned int ane_stub_symbol_index(id self, SEL _cmd) {
+    (void)_cmd;
+    id v = objc_getAssociatedObject(self, &g_ane_symbol_index_key);
+    return v ? (unsigned int)[v unsignedIntValue] : 0;
+}
+
+static void install_symbol_index_on(Class cls) {
+    if (!cls) return;
+    SEL s = sel_registerName("symbolIndex");
+    if ([cls instancesRespondToSelector:s]) return;
+    class_addMethod(cls, s, (IMP)ane_stub_symbol_index, "I@:");
 }
 
 BOOL ane_private_load(void) {
@@ -91,7 +99,16 @@ BOOL ane_private_load(void) {
         g_AneSharedSignalEventCls = NSClassFromString(@"_ANESharedSignalEvent");
         g_AneSharedWaitEventCls   = NSClassFromString(@"_ANESharedWaitEvent");
         g_AneChainingRequestCls   = NSClassFromString(@"_ANEChainingRequest");
-        g_AneProgramForEvalCls    = NSClassFromString(@"_ANEProgramForEvaluation");
+        g_AneDeviceInfoCls        = NSClassFromString(@"_ANEDeviceInfo");
+
+        /* Make every class that ane_chain_create may put into
+         * `inputs:` / `outputSets:` respond to `-symbolIndex`. NSArray
+         * is included because the chain uses array-of-array structure
+         * for inputs (each inner array is one "input set"). */
+        install_symbol_index_on(g_AneIOSurfaceCls);
+        install_symbol_index_on(NSClassFromString(@"_ANEIOSurfaceOutputSets"));
+        install_symbol_index_on(NSClassFromString(@"NSArray"));
+
         ok = YES;
     });
     return ok;

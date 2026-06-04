@@ -1,8 +1,5 @@
 # Contributing to ane-bridge
 
-Thanks for your interest. This is a small project; the contribution
-process matches that.
-
 ## Development setup
 
 Requires a recent macOS with the Xcode command line tools, Python 3.11+,

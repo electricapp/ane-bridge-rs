@@ -17,12 +17,15 @@
 //! - String pointers returned by `ane_last_error` / `ane_bridge_version`
 //!   are owned by the library and remain valid until the next call on
 //!   the same thread (errors are thread-local) or program exit (version).
-#![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
-// FFI `repr(C)` enums and pointer types make many pedantic lints noisy.
-// These specific allows are scoped to this crate and justified inline.
 #![allow(
-    clippy::missing_safety_doc,        // every `extern "C"` is unsafe by definition; docs live on the C header
-    clippy::upper_case_acronyms,       // AneQoS / AneIO follow Apple naming
+    non_camel_case_types,
+    non_snake_case,
+    non_upper_case_globals,
+    reason = "FFI symbols mirror the C header's naming exactly"
+)]
+#![allow(
+    clippy::upper_case_acronyms,
+    reason = "FFI types reflect the C contract (AneQoS, AneIO, etc.)"
 )]
 
 use core::ffi::{c_char, c_int, c_void};
@@ -280,7 +283,7 @@ pub struct AneModelInstanceParams {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct AneModelFileOpenOptionsEx {
-    /// Base options (URL, cache key, QoS, etc.).
+    /// Base options (URL, cache key, `QoS`, etc.).
     pub base: AneModelFileOpenOptions,
     /// `id` pointer to an `NSDictionary*` of MPS constants, or null.
     pub mps_constants_id: *mut c_void,
@@ -313,295 +316,842 @@ pub type AneCompletionFn =
 
 unsafe extern "C" {
     /// Returns a static UTF-8 version string ("0.1.0" etc.). Never null.
+    ///
+    /// # Safety
+    /// No arguments. Returns a pointer to a NUL-terminated string baked
+    /// into the dylib's read-only segment — valid until process exit.
     pub fn ane_bridge_version() -> *const c_char;
 
     /// Returns the thread-local last error message, or "" if none. The
     /// returned pointer is only valid until the next library call on
     /// this thread.
+    ///
+    /// # Safety
+    /// No arguments. The returned pointer aliases a thread-local buffer
+    /// and is invalidated by the next library call on the same thread —
+    /// copy out before making another call.
     pub fn ane_last_error() -> *const c_char;
 
     /// Returns the size in bytes of one element of `dt`, or 0 if unknown.
+    ///
+    /// # Safety
+    /// `dt` is passed by value; this is a pure function with no pointers
+    /// to validate.
     pub fn ane_dtype_size(dt: AneDtype) -> usize;
 
     /// Compile + load a model. On success writes a non-null model handle to `*out`.
+    ///
+    /// # Safety
+    /// `opts` must point to a fully-initialized `AneModelOpenOptions`
+    /// whose `mil_path` and `weights_path` C strings are valid for the
+    /// duration of the call. `out` must point to writable storage for
+    /// one `*mut AneModel`. On `AneStatus::Ok` the written handle must
+    /// be released via [`ane_model_close`].
     pub fn ane_model_open(opts: *const AneModelOpenOptions, out: *mut *mut AneModel) -> AneStatus;
+
     /// Unload and free the model. Safe on null.
+    ///
+    /// # Safety
+    /// `model` must be a handle previously returned by one of the
+    /// `ane_model_open*` functions, or null. After this call returns,
+    /// `model` and every `AneRequest` / `AneBuffer` derived from it are
+    /// dangling and must not be touched.
     pub fn ane_model_close(model: *mut AneModel);
 
     /// Number of declared input tensors.
+    ///
+    /// # Safety
+    /// `model` must be a live handle from `ane_model_open*` (not closed,
+    /// not null).
     pub fn ane_model_num_inputs(model: *const AneModel) -> i32;
+
     /// Number of declared output tensors.
+    ///
+    /// # Safety
+    /// `model` must be a live handle from `ane_model_open*` (not closed,
+    /// not null).
     pub fn ane_model_num_outputs(model: *const AneModel) -> i32;
     /// Returns a pointer to the input spec at `idx`, or null if out of range.
     /// Lifetime: valid until `ane_model_close(model)`.
+    ///
+    /// # Safety
+    /// `model` must be live. Returned pointer (when non-null) aliases
+    /// storage inside the model and is invalidated by `ane_model_close`.
     pub fn ane_model_input_spec(model: *const AneModel, idx: i32) -> *const AneTensorSpec;
+
     /// Returns a pointer to the output spec at `idx`. Same lifetime rules
     /// as `ane_model_input_spec`.
+    ///
+    /// # Safety
+    /// `model` must be live. Returned pointer (when non-null) aliases
+    /// storage inside the model and is invalidated by `ane_model_close`.
     pub fn ane_model_output_spec(model: *const AneModel, idx: i32) -> *const AneTensorSpec;
+
     /// Total byte size of input `idx`. 0 if out of range.
+    ///
+    /// # Safety
+    /// `model` must be live. `idx` is bounds-checked internally; out-of-range returns 0.
     pub fn ane_model_input_nbytes(model: *const AneModel, idx: i32) -> usize;
+
     /// Total byte size of output `idx`. 0 if out of range.
+    ///
+    /// # Safety
+    /// `model` must be live. `idx` is bounds-checked internally; out-of-range returns 0.
     pub fn ane_model_output_nbytes(model: *const AneModel, idx: i32) -> usize;
 
     /// True if `ane_model_open` reused a cached lowered artifact instead
     /// of running a fresh compile. The cache lives in the aned daemon
     /// keyed by content hash; it survives across processes but not aned
     /// restarts or its opaque eviction policy.
+    ///
+    /// # Safety
+    /// `model` must be live.
     pub fn ane_model_was_cached(model: *const AneModel) -> bool;
 
     /// Allocate a fresh `nbytes`-sized IOSurface-backed buffer.
+    ///
+    /// # Safety
+    /// `out` must point to writable storage for one `*mut AneBuffer`. On
+    /// `AneStatus::Ok`, the written handle must be released with
+    /// [`ane_buffer_release`].
     pub fn ane_buffer_create(nbytes: usize, out: *mut *mut AneBuffer) -> AneStatus;
+
     /// Convenience: allocate a buffer sized for input `idx` of `m`.
+    ///
+    /// # Safety
+    /// `m` must be live. `out` must point to writable storage for one
+    /// `*mut AneBuffer`. On `AneStatus::Ok`, the written handle must be
+    /// released with [`ane_buffer_release`].
     pub fn ane_buffer_create_for_input(
         m: *const AneModel,
         idx: i32,
         out: *mut *mut AneBuffer,
     ) -> AneStatus;
+
     /// Convenience: allocate a buffer sized for output `idx` of `m`.
+    ///
+    /// # Safety
+    /// `m` must be live. `out` must point to writable storage for one
+    /// `*mut AneBuffer`. On `AneStatus::Ok`, the written handle must be
+    /// released with [`ane_buffer_release`].
     pub fn ane_buffer_create_for_output(
         m: *const AneModel,
         idx: i32,
         out: *mut *mut AneBuffer,
     ) -> AneStatus;
+
     /// Release a buffer. Safe on null.
+    ///
+    /// # Safety
+    /// `buf` must be a handle returned by one of the
+    /// `ane_buffer_create*` calls (or null). After return, any pointer
+    /// obtained from a prior `ane_buffer_lock` is dangling.
     pub fn ane_buffer_release(buf: *mut AneBuffer);
+
     /// Lock the buffer for host access; writes the mapped base pointer to `*out_ptr`.
+    ///
+    /// # Safety
+    /// `buf` must be live and not currently locked. `out_ptr` must point
+    /// to writable storage for one `*mut c_void`. The returned pointer
+    /// is valid until the matching [`ane_buffer_unlock`] call.
     pub fn ane_buffer_lock(
         buf: *mut AneBuffer,
         access: AneBufferAccess,
         out_ptr: *mut *mut c_void,
     ) -> AneStatus;
+
     /// Pair to the most recent successful `ane_buffer_lock` on the same buffer.
+    ///
+    /// # Safety
+    /// `buf` must be live and currently locked. After this call, the
+    /// mapped pointer from the matching `ane_buffer_lock` is dangling.
     pub fn ane_buffer_unlock(buf: *mut AneBuffer) -> AneStatus;
     /// Buffer size in bytes.
+    ///
+    /// # Safety
+    /// `buf` must be live.
     pub fn ane_buffer_nbytes(buf: *const AneBuffer) -> usize;
+
     /// Returns the `IOSurface` ID for cross-process sharing, or 0 if none.
+    ///
+    /// # Safety
+    /// `buf` must be live.
     pub fn ane_buffer_iosurface_id(buf: *const AneBuffer) -> u32;
 
     /// Allocate a request bound to `model`.
+    ///
+    /// # Safety
+    /// `model` must be live (not closed). `out` must point to writable
+    /// storage for one `*mut AneRequest`. The returned handle must be
+    /// released with [`ane_request_release`].
     pub fn ane_request_create(model: *mut AneModel, out: *mut *mut AneRequest) -> AneStatus;
+
     /// Drain any in-flight eval, then release the request.
+    ///
+    /// # Safety
+    /// `req` must be a handle from [`ane_request_create`] (or null).
+    /// Blocks until any pending submission completes. After return,
+    /// every buffer previously bound into `req` is released by the
+    /// request's drop path.
     pub fn ane_request_release(req: *mut AneRequest);
+
     /// Zero-copy bind: associate `buf` with input slot `idx`.
+    ///
+    /// # Safety
+    /// `req` must be live and not currently submitted. `buf` must be
+    /// live; ownership transfers — do not call `ane_buffer_release` on
+    /// it after this returns `Ok`.
     pub fn ane_request_bind_input(req: *mut AneRequest, idx: i32, buf: *mut AneBuffer)
     -> AneStatus;
+
     /// Zero-copy bind: associate `buf` with output slot `idx`.
+    ///
+    /// # Safety
+    /// `req` must be live and not currently submitted. `buf` must be
+    /// live; ownership transfers — do not call `ane_buffer_release` on
+    /// it after this returns `Ok`.
     pub fn ane_request_bind_output(
         req: *mut AneRequest,
         idx: i32,
         buf: *mut AneBuffer,
     ) -> AneStatus;
+
     /// Fast-path: memcpy `nbytes` of `data` into the internal input buffer for `idx`.
+    ///
+    /// # Safety
+    /// `req` must be live and not currently submitted. `data` must point
+    /// to a region of at least `nbytes` valid bytes. `nbytes` must match
+    /// the input's declared size — short copies are rejected.
     pub fn ane_request_set_input_bytes(
         req: *mut AneRequest,
         idx: i32,
         data: *const c_void,
         nbytes: usize,
     ) -> AneStatus;
+
     /// Fast-path: memcpy `nbytes` of the completed output `idx` into `data`.
+    ///
+    /// # Safety
+    /// `req` must be live, with the most recent submission complete.
+    /// `data` must point to a writable region of at least `nbytes`.
+    /// `nbytes` must match the output's declared size.
     pub fn ane_request_get_output_bytes(
         req: *mut AneRequest,
         idx: i32,
         data: *mut c_void,
         nbytes: usize,
     ) -> AneStatus;
+
     /// Submit asynchronously. Returns `Busy` if a prior submission is still in flight.
+    ///
+    /// # Safety
+    /// `req` must be live. All required inputs must have been bound or
+    /// filled. Submission borrows the bound buffers until completion —
+    /// the caller must not release them concurrently.
     pub fn ane_request_submit(req: *mut AneRequest, qos: AneQoS) -> AneStatus;
+
     /// Wait up to `timeout_ms` for the in-flight submission to complete.
     /// `< 0` = forever, `0` = poll.
+    ///
+    /// # Safety
+    /// `req` must be live. Returns `Timeout` if the wait expires
+    /// (bound buffers stay borrowed until the next successful wait).
     pub fn ane_request_wait(req: *mut AneRequest, timeout_ms: c_int) -> AneStatus;
+
     /// Non-blocking completion check.
+    ///
+    /// # Safety
+    /// `req` must be live. Reads the in-flight flag atomically; no side effects.
     pub fn ane_request_is_done(req: *const AneRequest) -> c_bool;
+
     /// Convenience: submit + wait(-1).
+    ///
+    /// # Safety
+    /// Same as [`ane_request_submit`] and [`ane_request_wait`] combined —
+    /// `req` must be live with all required inputs bound.
     pub fn ane_request_run(req: *mut AneRequest, qos: AneQoS) -> AneStatus;
     /// Install (or clear, with `fn_ = None`) a completion callback.
+    ///
+    /// # Safety
+    /// `req` must be live. `fn_` (when `Some`) is invoked on the worker
+    /// thread after submission completes and must be safe to call from
+    /// any thread. `user` is opaque to the bridge; the caller is
+    /// responsible for its lifetime relative to outstanding submissions.
     pub fn ane_request_set_completion(
         req: *mut AneRequest,
         fn_: Option<AneCompletionFn>,
         user: *mut c_void,
     ) -> AneStatus;
+
     /// Per-request error message captured by the worker thread on the
     /// most recent eval. Returns `""` if no error or no submission yet.
+    ///
+    /// # Safety
+    /// `req` must be live. Returned pointer aliases per-request storage
+    /// and is invalidated by the next submission on the same request.
     pub fn ane_request_last_error(req: *const AneRequest) -> *const c_char;
 
     /// Populate `*out` with the ANE device facts (core count, arch string).
+    ///
+    /// # Safety
+    /// `out` must point to writable storage for one `AneDeviceInfo`. No
+    /// model handle required — this queries `_ANEVirtualClient`.
     pub fn ane_device_info(out: *mut AneDeviceInfo) -> AneStatus;
 
     /// Number of procedures (entry points) in the loaded model. Always >= 1.
+    ///
+    /// # Safety
+    /// `model` must be live.
     pub fn ane_model_num_procedures(model: *const AneModel) -> i32;
+
     /// Number of inputs for procedure `p`.
-    pub fn ane_model_num_inputs_for_procedure (m: *const AneModel, p: i32) -> i32;
+    ///
+    /// # Safety
+    /// `m` must be live. `p` is bounds-checked internally; out-of-range
+    /// returns 0.
+    pub fn ane_model_num_inputs_for_procedure(m: *const AneModel, p: i32) -> i32;
+
     /// Number of outputs for procedure `p`.
+    ///
+    /// # Safety
+    /// `m` must be live. `p` is bounds-checked internally; out-of-range
+    /// returns 0.
     pub fn ane_model_num_outputs_for_procedure(m: *const AneModel, p: i32) -> i32;
+
     /// Spec pointer for input `idx` of procedure `p`. Valid until model close.
-    pub fn ane_model_input_spec_for_procedure (m: *const AneModel, p: i32, idx: i32) -> *const AneTensorSpec;
+    ///
+    /// # Safety
+    /// `m` must be live. Returned pointer (when non-null) aliases
+    /// storage inside the model and is invalidated by `ane_model_close`.
+    pub fn ane_model_input_spec_for_procedure(
+        m: *const AneModel,
+        p: i32,
+        idx: i32,
+    ) -> *const AneTensorSpec;
+
     /// Spec pointer for output `idx` of procedure `p`. Valid until model close.
-    pub fn ane_model_output_spec_for_procedure(m: *const AneModel, p: i32, idx: i32) -> *const AneTensorSpec;
+    ///
+    /// # Safety
+    /// `m` must be live. Returned pointer (when non-null) aliases
+    /// storage inside the model and is invalidated by `ane_model_close`.
+    pub fn ane_model_output_spec_for_procedure(
+        m: *const AneModel,
+        p: i32,
+        idx: i32,
+    ) -> *const AneTensorSpec;
     /// Byte size of input `idx` of procedure `p`. 0 if out of range.
-    pub fn ane_model_input_nbytes_for_procedure (m: *const AneModel, p: i32, idx: i32) -> usize;
+    ///
+    /// # Safety
+    /// `m` must be live. `p` and `idx` are bounds-checked internally.
+    pub fn ane_model_input_nbytes_for_procedure(m: *const AneModel, p: i32, idx: i32) -> usize;
+
     /// Byte size of output `idx` of procedure `p`. 0 if out of range.
+    ///
+    /// # Safety
+    /// `m` must be live. `p` and `idx` are bounds-checked internally.
     pub fn ane_model_output_nbytes_for_procedure(m: *const AneModel, p: i32, idx: i32) -> usize;
 
     /// Hardware queue depth reported for this model (max in-flight requests).
+    ///
+    /// # Safety
+    /// `m` must be live.
     pub fn ane_model_queue_depth(m: *const AneModel) -> i32;
+
     /// Number of evaluations currently in flight against this model.
-    pub fn ane_model_in_flight  (m: *const AneModel) -> i64;
+    ///
+    /// # Safety
+    /// `m` must be live. Reads the in-flight counter from
+    /// `_ANEProgramForEvaluation` atomically.
+    pub fn ane_model_in_flight(m: *const AneModel) -> i64;
 
     /// `hexStringIdentifier` of the loaded program. Library-owned; empty if absent.
-    pub fn ane_model_program_id   (m: *const AneModel) -> *const c_char;
+    ///
+    /// # Safety
+    /// `m` must be live. Returned pointer aliases storage inside the
+    /// model and is invalidated by `ane_model_close`.
+    pub fn ane_model_program_id(m: *const AneModel) -> *const c_char;
+
     /// `weightsHash` of the descriptor. Library-owned; empty if absent.
-    pub fn ane_model_weights_hash (m: *const AneModel) -> *const c_char;
+    ///
+    /// # Safety
+    /// `m` must be live. Returned pointer aliases storage inside the
+    /// model and is invalidated by `ane_model_close`.
+    pub fn ane_model_weights_hash(m: *const AneModel) -> *const c_char;
+
     /// Writes the opaque driver `programHandle`. Returns true on success.
-    pub fn ane_model_program_handle            (m: *const AneModel, out: *mut u64) -> bool;
+    ///
+    /// # Safety
+    /// `m` must be live. `out` must point to writable storage for one `u64`.
+    pub fn ane_model_program_handle(m: *const AneModel, out: *mut u64) -> bool;
+
     /// Writes the opaque `intermediateBufferHandle`. Returns true on success.
+    ///
+    /// # Safety
+    /// `m` must be live. `out` must point to writable storage for one `u64`.
     pub fn ane_model_intermediate_buffer_handle(m: *const AneModel, out: *mut u64) -> bool;
 
     /// True if `aned` already has a compiled artifact for this hex hash.
+    ///
+    /// # Safety
+    /// `hex` must point to a NUL-terminated lowercase-hex string for the
+    /// duration of the call.
     pub fn ane_cache_exists_for_hash(hex: *const c_char) -> bool;
+
     /// Evict the compiled artifact for this hex hash from `aned`.
-    pub fn ane_cache_purge_for_hash (hex: *const c_char) -> AneStatus;
+    ///
+    /// # Safety
+    /// `hex` must point to a NUL-terminated lowercase-hex string for the
+    /// duration of the call. Returns `Unsupported` from unsigned binaries.
+    pub fn ane_cache_purge_for_hash(hex: *const c_char) -> AneStatus;
 
     /// Extended open: in-memory MIL bytes + multi-blob `NSDictionary` weights.
-    pub fn ane_model_open_ex  (opts: *const AneModelOpenOptionsEx, out: *mut *mut AneModel) -> AneStatus;
+    ///
+    /// # Safety
+    /// `opts` must point to a fully-initialized `AneModelOpenOptionsEx`
+    /// whose `weights` array entries are valid for the call. `out` must
+    /// point to writable storage; the resulting handle must be released
+    /// via [`ane_model_close`].
+    pub fn ane_model_open_ex(
+        opts: *const AneModelOpenOptionsEx,
+        out: *mut *mut AneModel,
+    ) -> AneStatus;
     /// File-based open via `_ANEModel modelAtURL:key:`. Accepts compiled bundles.
-    pub fn ane_model_open_file(opts: *const AneModelFileOpenOptions, out: *mut *mut AneModel) -> AneStatus;
+    ///
+    /// # Safety
+    /// `opts` must point to a fully-initialized `AneModelFileOpenOptions`
+    /// whose path strings are valid for the call. `out` must point to
+    /// writable storage; the resulting handle must be released via
+    /// [`ane_model_close`].
+    pub fn ane_model_open_file(
+        opts: *const AneModelFileOpenOptions,
+        out: *mut *mut AneModel,
+    ) -> AneStatus;
 
     /// Open with the real-time priority class. Pair with [`ane_realtime_task_begin`].
-    pub fn ane_model_open_realtime   (opts: *const AneModelOpenOptions,   out: *mut *mut AneModel) -> AneStatus;
+    ///
+    /// # Safety
+    /// Same contract as [`ane_model_open`]. Loading at real-time priority
+    /// requires the `com.apple.private.aned.realtime` entitlement;
+    /// unsigned callers get `Unsupported`.
+    pub fn ane_model_open_realtime(
+        opts: *const AneModelOpenOptions,
+        out: *mut *mut AneModel,
+    ) -> AneStatus;
+
     /// Real-time variant of [`ane_model_open_ex`].
-    pub fn ane_model_open_realtime_ex(opts: *const AneModelOpenOptionsEx, out: *mut *mut AneModel) -> AneStatus;
+    ///
+    /// # Safety
+    /// Same contract as [`ane_model_open_ex`]. Loading at real-time
+    /// priority requires the real-time entitlement; unsigned callers get
+    /// `Unsupported`.
+    pub fn ane_model_open_realtime_ex(
+        opts: *const AneModelOpenOptionsEx,
+        out: *mut *mut AneModel,
+    ) -> AneStatus;
+
     /// Enter the ANE real-time scheduling class for the current thread.
+    ///
+    /// # Safety
+    /// No arguments. Must be paired with a later
+    /// [`ane_realtime_task_end`] on the same thread. Returns
+    /// `Unsupported` without the real-time entitlement.
     pub fn ane_realtime_task_begin() -> AneStatus;
+
     /// Leave the real-time scheduling class.
-    pub fn ane_realtime_task_end  () -> AneStatus;
+    ///
+    /// # Safety
+    /// No arguments. Must be called on the same thread that previously
+    /// called [`ane_realtime_task_begin`] successfully.
+    pub fn ane_realtime_task_end() -> AneStatus;
 
     /// Allocate a fresh `_ANEPerformanceStats` wrapper for use in a request.
-    pub fn ane_perf_stats_create (out: *mut *mut AnePerfStats) -> AneStatus;
+    ///
+    /// # Safety
+    /// `out` must point to writable storage for one `*mut AnePerfStats`.
+    /// The handle must be released with [`ane_perf_stats_release`].
+    pub fn ane_perf_stats_create(out: *mut *mut AnePerfStats) -> AneStatus;
+
     /// Release the stats wrapper.
+    ///
+    /// # Safety
+    /// `ps` must be a handle from [`ane_perf_stats_create`] (or null).
+    /// Must not be in use by an in-flight request.
     pub fn ane_perf_stats_release(ps: *mut AnePerfStats);
+
     /// Hardware execution time of the most recent eval, in nanoseconds.
+    ///
+    /// # Safety
+    /// `ps` must be live and previously populated by a completed
+    /// submission that bound `ps` via [`ane_request_set_perf_stats`].
     pub fn ane_perf_stats_hw_execution_ns(ps: *const AnePerfStats) -> u64;
+
     /// Byte size of the raw counter blob; use to size a buffer for `_counters_copy`.
+    ///
+    /// # Safety
+    /// `ps` must be live.
     pub fn ane_perf_stats_counters_nbytes(ps: *const AnePerfStats) -> usize;
+
     /// Copy up to `cap` bytes of the raw counter blob into `out`; returns copied byte count.
-    pub fn ane_perf_stats_counters_copy  (ps: *const AnePerfStats, out: *mut c_void, cap: usize) -> usize;
+    ///
+    /// # Safety
+    /// `ps` must be live. `out` must point to a writable region of at
+    /// least `cap` bytes.
+    pub fn ane_perf_stats_counters_copy(
+        ps: *const AnePerfStats,
+        out: *mut c_void,
+        cap: usize,
+    ) -> usize;
 
     /// Bitmask telling the driver which hardware counters to populate; set before eval.
+    ///
+    /// # Safety
+    /// `m` must be live. Setting after submission has no effect on
+    /// in-flight requests.
     pub fn ane_model_set_perf_stats_mask(m: *mut AneModel, mask: u32) -> AneStatus;
     /// Read back the current `perfStatsMask`.
+    ///
+    /// # Safety
+    /// `m` must be live.
     pub fn ane_model_get_perf_stats_mask(m: *const AneModel) -> u32;
 
     /// Allocate a fresh `_ANESharedEvents` container.
-    pub fn ane_shared_events_create (out: *mut *mut AneSharedEvents) -> AneStatus;
+    ///
+    /// # Safety
+    /// `out` must point to writable storage for one `*mut AneSharedEvents`.
+    /// The handle must be released with [`ane_shared_events_release`].
+    pub fn ane_shared_events_create(out: *mut *mut AneSharedEvents) -> AneStatus;
+
     /// Release the container and drop its event references.
+    ///
+    /// # Safety
+    /// `ev` must be a handle from [`ane_shared_events_create`] (or null).
+    /// Must not be in use by an in-flight request.
     pub fn ane_shared_events_release(ev: *mut AneSharedEvents);
+
     /// Append a signal event. `mtl_shared_event` is a borrowed `id`
     /// pointing at a Metal `MTLSharedEvent` (retained by the container).
+    ///
+    /// # Safety
+    /// `ev` must be live. `mtl_shared_event`, when non-null, must point
+    /// to a live Objective-C `MTLSharedEvent` instance; the container
+    /// `CFRetain`s it. Stored events are released on
+    /// [`ane_shared_events_release`].
     pub fn ane_shared_events_add_signal(
-        ev: *mut AneSharedEvents, value: u64, symbol_index: u32,
-        event_type: AneEventType, mtl_shared_event: *mut c_void, agent_mask: u64
+        ev: *mut AneSharedEvents,
+        value: u64,
+        symbol_index: u32,
+        event_type: AneEventType,
+        mtl_shared_event: *mut c_void,
+        agent_mask: u64,
     ) -> AneStatus;
+
     /// Append a wait event. Same `mtl_shared_event` contract as `_add_signal`.
+    ///
+    /// # Safety
+    /// `ev` must be live. `mtl_shared_event`, when non-null, must point
+    /// to a live Objective-C `MTLSharedEvent` instance; the container
+    /// `CFRetain`s it.
     pub fn ane_shared_events_add_wait(
-        ev: *mut AneSharedEvents, value: u64,
-        mtl_shared_event: *mut c_void, event_type: AneEventType
+        ev: *mut AneSharedEvents,
+        value: u64,
+        mtl_shared_event: *mut c_void,
+        event_type: AneEventType,
     ) -> AneStatus;
+
     /// Number of signal events queued.
+    ///
+    /// # Safety
+    /// `ev` must be live.
     pub fn ane_shared_events_num_signals(ev: *const AneSharedEvents) -> i32;
+
     /// Number of wait events queued.
-    pub fn ane_shared_events_num_waits  (ev: *const AneSharedEvents) -> i32;
+    ///
+    /// # Safety
+    /// `ev` must be live.
+    pub fn ane_shared_events_num_waits(ev: *const AneSharedEvents) -> i32;
 
     /// Per-request weight override. Pass null to clear. Buffer must outlive the request.
-    pub fn ane_request_set_weights        (req: *mut AneRequest, weights: *mut AneBuffer)     -> AneStatus;
+    ///
+    /// # Safety
+    /// `req` must be live. When non-null, `weights` must be live for the
+    /// lifetime of all submissions that observe this binding (until
+    /// cleared or the request is released).
+    pub fn ane_request_set_weights(req: *mut AneRequest, weights: *mut AneBuffer) -> AneStatus;
+
     /// Select which procedure (entry point) this request targets. Default 0.
-    pub fn ane_request_set_procedure_index(req: *mut AneRequest, proc_idx: i32)               -> AneStatus;
+    ///
+    /// # Safety
+    /// `req` must be live. `proc_idx` is bounds-checked against
+    /// `ane_model_num_procedures`.
+    pub fn ane_request_set_procedure_index(req: *mut AneRequest, proc_idx: i32) -> AneStatus;
+
     /// Attach a perf-stats sink for the next eval. Null clears.
-    pub fn ane_request_set_perf_stats     (req: *mut AneRequest, ps: *mut AnePerfStats)       -> AneStatus;
+    ///
+    /// # Safety
+    /// `req` must be live. When non-null, `ps` must outlive the
+    /// submissions that observe this binding.
+    pub fn ane_request_set_perf_stats(req: *mut AneRequest, ps: *mut AnePerfStats) -> AneStatus;
+
     /// Attach a shared-events container for GPU↔ANE synchronization.
-    pub fn ane_request_set_shared_events  (req: *mut AneRequest, ev: *mut AneSharedEvents)    -> AneStatus;
+    ///
+    /// # Safety
+    /// `req` must be live. When non-null, `ev` must outlive the
+    /// submissions that observe this binding.
+    pub fn ane_request_set_shared_events(
+        req: *mut AneRequest,
+        ev: *mut AneSharedEvents,
+    ) -> AneStatus;
     /// Set the transaction handle used to group this request with others.
-    pub fn ane_request_set_transaction    (req: *mut AneRequest, handle: u64)                 -> AneStatus;
+    ///
+    /// # Safety
+    /// `req` must be live.
+    pub fn ane_request_set_transaction(req: *mut AneRequest, handle: u64) -> AneStatus;
+
     /// Read the currently-set procedure index.
-    pub fn ane_request_procedure_index    (req: *const AneRequest) -> i32;
+    ///
+    /// # Safety
+    /// `req` must be live.
+    pub fn ane_request_procedure_index(req: *const AneRequest) -> i32;
+
     /// Read the currently-set transaction handle.
-    pub fn ane_request_transaction        (req: *const AneRequest) -> u64;
+    ///
+    /// # Safety
+    /// `req` must be live.
+    pub fn ane_request_transaction(req: *const AneRequest) -> u64;
 
     /// Returns the borrowed `IOSurfaceRef` backing this buffer; do not release.
-    pub fn ane_buffer_iosurface_ref  (buf: *const AneBuffer) -> *mut c_void;
-    /// Wrap a caller-supplied `IOSurfaceRef` in a fresh `AneBuffer` (CFRetains the surface).
-    pub fn ane_buffer_adopt_iosurface(surface: *mut c_void, nbytes: usize, out: *mut *mut AneBuffer) -> AneStatus;
+    ///
+    /// # Safety
+    /// `buf` must be live. The returned pointer is a borrowed
+    /// `IOSurfaceRef` whose retain count is owned by `buf` — do not
+    /// call `CFRelease` on it.
+    pub fn ane_buffer_iosurface_ref(buf: *const AneBuffer) -> *mut c_void;
+
+    /// Wrap a caller-supplied `IOSurfaceRef` in a fresh `AneBuffer` (`CFRetain`s the surface).
+    ///
+    /// # Safety
+    /// `surface` must point to a live `IOSurfaceRef`. The bridge
+    /// `CFRetain`s it, so the caller can release its own reference
+    /// after this returns `Ok`. `out` must point to writable storage
+    /// for one `*mut AneBuffer`; the resulting handle must be released
+    /// with [`ane_buffer_release`].
+    pub fn ane_buffer_adopt_iosurface(
+        surface: *mut c_void,
+        nbytes: usize,
+        out: *mut *mut AneBuffer,
+    ) -> AneStatus;
 
     /// Build a chained dispatch from `n_steps` configured requests.
-    pub fn ane_chain_create (steps: *const AneChainStep, n_steps: i32, out: *mut *mut AneChain) -> AneStatus;
+    ///
+    /// # Safety
+    /// `steps` must point to `n_steps` initialized `AneChainStep`
+    /// entries. Each step's referenced model and buffers must outlive
+    /// the chain. `out` must point to writable storage; resulting
+    /// handle must be released with [`ane_chain_release`].
+    pub fn ane_chain_create(
+        steps: *const AneChainStep,
+        n_steps: i32,
+        out: *mut *mut AneChain,
+    ) -> AneStatus;
+
     /// One-time preparation: maps intermediate buffers and resolves loopback symbols.
+    ///
+    /// # Safety
+    /// `chain` must be live. Requires the daemon-routed XPC path
+    /// (sandbox-extension entitlement); unsigned callers get
+    /// `Unsupported`.
     pub fn ane_chain_prepare(chain: *mut AneChain, qos: AneQoS) -> AneStatus;
+
     /// Submit the chain. May be called repeatedly after a successful prepare.
+    ///
+    /// # Safety
+    /// `chain` must be live and have completed a successful
+    /// [`ane_chain_prepare`].
     pub fn ane_chain_enqueue(chain: *mut AneChain, qos: AneQoS) -> AneStatus;
+
     /// Block until the most recent enqueue completes; same timeout semantics as `ane_request_wait`.
-    pub fn ane_chain_wait   (chain: *mut AneChain, timeout_ms: c_int) -> AneStatus;
+    ///
+    /// # Safety
+    /// `chain` must be live. Returns `Timeout` if the wait expires.
+    pub fn ane_chain_wait(chain: *mut AneChain, timeout_ms: c_int) -> AneStatus;
+
     /// Release the chain. Safe on null.
+    ///
+    /// # Safety
+    /// `chain` must be a handle from [`ane_chain_create`] (or null).
     pub fn ane_chain_release(chain: *mut AneChain);
 
     /// Route a compressed weight blob through the framework's parallel decompressor.
     /// Allocates `*out_bytes` via `malloc`; caller frees with `libc::free`.
+    ///
+    /// # Safety
+    /// `compressed` must point to a region of at least `nbytes` valid
+    /// bytes. `out_bytes` and `out_nbytes` must point to writable
+    /// storage. On `Ok`, `*out_bytes` is a `malloc`-allocated buffer
+    /// that the caller must `free`.
     pub fn ane_decompress_weights(
-        compressed: *const c_void, nbytes: usize,
-        out_bytes: *mut *mut c_void, out_nbytes: *mut usize,
+        compressed: *const c_void,
+        nbytes: usize,
+        out_bytes: *mut *mut c_void,
+        out_nbytes: *mut usize,
     ) -> AneStatus;
 
     /// `_ANEModel.UUID` as a UTF-8 string; library-owned; empty if absent.
-    pub fn ane_model_uuid                (m: *const AneModel) -> *const c_char;
+    ///
+    /// # Safety
+    /// `m` must be live. Returned pointer aliases storage inside the
+    /// model and is invalidated by `ane_model_close`.
+    pub fn ane_model_uuid(m: *const AneModel) -> *const c_char;
+
     /// `_ANEModel.sourceURL.absoluteString`; library-owned; empty if absent.
-    pub fn ane_model_source_url          (m: *const AneModel) -> *const c_char;
+    ///
+    /// # Safety
+    /// `m` must be live. Returned pointer aliases storage inside the
+    /// model and is invalidated by `ane_model_close`.
+    pub fn ane_model_source_url(m: *const AneModel) -> *const c_char;
+
     /// `_ANEModel.modelURL.absoluteString`; library-owned; empty if absent.
-    pub fn ane_model_model_url           (m: *const AneModel) -> *const c_char;
+    ///
+    /// # Safety
+    /// `m` must be live. Returned pointer aliases storage inside the
+    /// model and is invalidated by `ane_model_close`.
+    pub fn ane_model_model_url(m: *const AneModel) -> *const c_char;
+
     /// `_ANEModel.key`; library-owned; empty if absent.
-    pub fn ane_model_key                 (m: *const AneModel) -> *const c_char;
+    ///
+    /// # Safety
+    /// `m` must be live. Returned pointer aliases storage inside the
+    /// model and is invalidated by `ane_model_close`.
+    pub fn ane_model_key(m: *const AneModel) -> *const c_char;
+
     /// `_ANEModel.cacheURLIdentifier`; library-owned; empty if absent.
+    ///
+    /// # Safety
+    /// `m` must be live. Returned pointer aliases storage inside the
+    /// model and is invalidated by `ane_model_close`.
     pub fn ane_model_cache_url_identifier(m: *const AneModel) -> *const c_char;
+
     /// `_ANEModel.identifierSource` raw enum value.
-    pub fn ane_model_identifier_source   (m: *const AneModel) -> i64;
+    ///
+    /// # Safety
+    /// `m` must be live.
+    pub fn ane_model_identifier_source(m: *const AneModel) -> i64;
 
     /// Reset transient model state on the next unload.
+    ///
+    /// # Safety
+    /// `m` must be live and not currently submitted.
     pub fn ane_model_reset_on_unload(m: *mut AneModel) -> AneStatus;
+
     /// Explicit unload (without freeing the handle). Pairs with re-load patterns.
-    pub fn ane_model_unload         (m: *mut AneModel) -> AneStatus;
+    ///
+    /// # Safety
+    /// `m` must be live. The handle remains valid (call
+    /// [`ane_model_close`] to free it). All in-flight submissions must
+    /// have completed.
+    pub fn ane_model_unload(m: *mut AneModel) -> AneStatus;
 
     /// Load a fresh runtime instance sharing the same compiled program.
+    ///
+    /// # Safety
+    /// `src` must be live. `params`, when non-null, must point to an
+    /// initialized `AneModelInstanceParams`. `out` must point to
+    /// writable storage; the resulting handle must be released with
+    /// [`ane_model_close`]. Requires a daemon-routed sandbox extension;
+    /// unsigned callers get `Unsupported`.
     pub fn ane_model_new_instance(
-        src: *mut AneModel, params: *const AneModelInstanceParams,
-        qos: AneQoS, out: *mut *mut AneModel,
+        src: *mut AneModel,
+        params: *const AneModelInstanceParams,
+        qos: AneQoS,
+        out: *mut *mut AneModel,
     ) -> AneStatus;
 
     /// Number of aned connections currently open for loading models.
+    ///
+    /// # Safety
+    /// No arguments. Pure process-wide query.
     pub fn ane_client_num_connections() -> i32;
+
     /// True if this model's `_ANEClient` is a virtual (per-process) client.
+    ///
+    /// # Safety
+    /// `m` must be live.
     pub fn ane_model_is_virtual_client(m: *const AneModel) -> bool;
 
     /// Allocate a session-hint object of the given kind.
-    pub fn ane_session_hint_create (kind: AneSessionHintKind, out: *mut *mut AneSessionHint) -> AneStatus;
+    ///
+    /// # Safety
+    /// `out` must point to writable storage for one
+    /// `*mut AneSessionHint`. The handle must be released with
+    /// [`ane_session_hint_release`].
+    pub fn ane_session_hint_create(
+        kind: AneSessionHintKind,
+        out: *mut *mut AneSessionHint,
+    ) -> AneStatus;
+
     /// Release the session-hint object.
+    ///
+    /// # Safety
+    /// `hint` must be a handle from [`ane_session_hint_create`] (or
+    /// null).
     pub fn ane_session_hint_release(hint: *mut AneSessionHint);
 
     /// Apply `hint` to `model`; if `out_report_json` is non-null, the
     /// framework's per-hint report is `malloc`'d as a UTF-8 JSON string.
+    ///
+    /// # Safety
+    /// `m` must be live. `hint` must be live. `out_report_json`, when
+    /// non-null, must point to writable storage for one `*mut c_char`;
+    /// on `Ok`, the written pointer (if non-null) is `malloc`-allocated
+    /// and the caller must `free` it. Requires a daemon-routed sandbox
+    /// extension; unsigned callers get `Unsupported`.
     pub fn ane_model_apply_session_hint(
-        m: *mut AneModel, hint: *const AneSessionHint, out_report_json: *mut *mut c_char,
+        m: *mut AneModel,
+        hint: *const AneSessionHint,
+        out_report_json: *mut *mut c_char,
     ) -> AneStatus;
 
     /// Extended file-open: includes `mpsConstants` and `modelAttributes`.
+    ///
+    /// # Safety
+    /// `opts` must point to a fully-initialized `AneModelFileOpenOptionsEx`
+    /// whose path strings and any caller-supplied dictionaries are valid
+    /// for the call. `out` must point to writable storage; the resulting
+    /// handle must be released via [`ane_model_close`].
     pub fn ane_model_open_file_ex(
-        opts: *const AneModelFileOpenOptionsEx, out: *mut *mut AneModel,
+        opts: *const AneModelFileOpenOptionsEx,
+        out: *mut *mut AneModel,
     ) -> AneStatus;
 
     /// Human-readable name of perf counter `counter_idx`. Library-owned.
+    ///
+    /// # Safety
+    /// `counter_idx` is bounds-checked internally; out-of-range returns
+    /// a pointer to "". Returned pointer aliases a thread-local buffer
+    /// and is invalidated by the next library call on the same thread.
     pub fn ane_perf_counter_name(counter_idx: i32) -> *const c_char;
-    /// Emit os_signpost events for the counters captured by `ps`.
-    pub fn ane_perf_stats_emit_signpost(ps: *const AnePerfStats, model_string_id: u64) -> AneStatus;
+
+    /// Emit `os_signpost` events for the counters captured by `ps`.
+    ///
+    /// # Safety
+    /// `ps` must be live and previously populated by a completed
+    /// submission. `model_string_id` is opaque to the bridge.
+    pub fn ane_perf_stats_emit_signpost(ps: *const AnePerfStats, model_string_id: u64)
+    -> AneStatus;
+
     /// Number of per-stage perf-stats objects attached to `req` (1 if single, N for chained).
+    ///
+    /// # Safety
+    /// `req` must be live.
     pub fn ane_request_num_perf_stats(req: *const AneRequest) -> i32;
+
     /// Borrowed stats handle for stage `idx`; null if out of range.
-    pub fn ane_request_perf_stats_at (req: *const AneRequest, idx: i32) -> *mut AnePerfStats;
+    ///
+    /// # Safety
+    /// `req` must be live. Returned pointer is a borrowed handle owned
+    /// by the request — do not pass to [`ane_perf_stats_release`].
+    /// `idx` is bounds-checked internally.
+    pub fn ane_request_perf_stats_at(req: *const AneRequest, idx: i32) -> *mut AnePerfStats;
 
     /// Internal: run a single adversarial case through the C-side
     /// `LiveInputList` parser. Not stable API.
@@ -667,10 +1217,22 @@ pub struct AneFuzzAttrsCase {
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<AneFuzzAttrsCase>() == 12);
-    assert!(core::mem::offset_of!(AneFuzzAttrsCase, mutations) == 0);
-    assert!(core::mem::offset_of!(AneFuzzAttrsCase, n_inputs) == 4);
-    assert!(core::mem::offset_of!(AneFuzzAttrsCase, n_outputs) == 8);
+    assert!(
+        core::mem::size_of::<AneFuzzAttrsCase>() == 12,
+        "AneFuzzAttrsCase ABI size drifted from the C struct"
+    );
+    assert!(
+        core::mem::offset_of!(AneFuzzAttrsCase, mutations) == 0,
+        "AneFuzzAttrsCase.mutations offset drift"
+    );
+    assert!(
+        core::mem::offset_of!(AneFuzzAttrsCase, n_inputs) == 4,
+        "AneFuzzAttrsCase.n_inputs offset drift"
+    );
+    assert!(
+        core::mem::offset_of!(AneFuzzAttrsCase, n_outputs) == 8,
+        "AneFuzzAttrsCase.n_outputs offset drift"
+    );
 };
 
 /// Field-presence bitmask used by [`AneFuzzCase`].
@@ -731,16 +1293,46 @@ pub struct AneFuzzCase {
 /// C struct layout. If anything changes on either side, this check
 /// breaks the build instead of silently misinterpreting fields.
 const _: () = {
-    assert!(core::mem::size_of::<AneFuzzCase>() == 64);
-    assert!(core::mem::offset_of!(AneFuzzCase, present_mask) == 0);
-    assert!(core::mem::offset_of!(AneFuzzCase, flags) == 4);
-    assert!(core::mem::offset_of!(AneFuzzCase, name) == 8);
-    assert!(core::mem::offset_of!(AneFuzzCase, type_string) == 16);
-    assert!(core::mem::offset_of!(AneFuzzCase, batches) == 24);
-    assert!(core::mem::offset_of!(AneFuzzCase, channels) == 32);
-    assert!(core::mem::offset_of!(AneFuzzCase, depth) == 40);
-    assert!(core::mem::offset_of!(AneFuzzCase, height) == 48);
-    assert!(core::mem::offset_of!(AneFuzzCase, width) == 56);
+    assert!(
+        core::mem::size_of::<AneFuzzCase>() == 64,
+        "AneFuzzCase ABI size drifted from the C struct"
+    );
+    assert!(
+        core::mem::offset_of!(AneFuzzCase, present_mask) == 0,
+        "AneFuzzCase.present_mask offset drift"
+    );
+    assert!(
+        core::mem::offset_of!(AneFuzzCase, flags) == 4,
+        "AneFuzzCase.flags offset drift"
+    );
+    assert!(
+        core::mem::offset_of!(AneFuzzCase, name) == 8,
+        "AneFuzzCase.name offset drift"
+    );
+    assert!(
+        core::mem::offset_of!(AneFuzzCase, type_string) == 16,
+        "AneFuzzCase.type_string offset drift"
+    );
+    assert!(
+        core::mem::offset_of!(AneFuzzCase, batches) == 24,
+        "AneFuzzCase.batches offset drift"
+    );
+    assert!(
+        core::mem::offset_of!(AneFuzzCase, channels) == 32,
+        "AneFuzzCase.channels offset drift"
+    );
+    assert!(
+        core::mem::offset_of!(AneFuzzCase, depth) == 40,
+        "AneFuzzCase.depth offset drift"
+    );
+    assert!(
+        core::mem::offset_of!(AneFuzzCase, height) == 48,
+        "AneFuzzCase.height offset drift"
+    );
+    assert!(
+        core::mem::offset_of!(AneFuzzCase, width) == 56,
+        "AneFuzzCase.width offset drift"
+    );
 };
 
 impl AneFuzzCase {

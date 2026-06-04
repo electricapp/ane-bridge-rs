@@ -24,6 +24,15 @@ ane-bridge-sys = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"
+# Used only by `examples/gpu_to_ane.rs` to drive Metal + IOSurface
+# without hand-rolled `objc_msgSend`. The objc2 family is the
+# actively-maintained Apple-API binding suite; the older `metal` /
+# `io-surface` crates are deprecated in favor of these.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSDictionary", "NSValue", "NSString"] }
+objc2-core-foundation = { version = "0.3", features = ["CFDictionary", "CFNumber", "CFString", "CFBase"] }
+objc2-io-surface = { version = "0.3", features = ["IOSurfaceRef"] }
+objc2-metal = { version = "0.3", features = ["MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLBlitCommandEncoder", "MTLBuffer", "MTLResource", "MTLEvent"] }
 
 # `loom` provides instrumented atomic/Mutex/thread primitives for the
 # `tests/loom_async.rs` model. Enabled only under `--cfg loom`.
@@ -44,3 +53,7 @@ path = "examples/zero_copy.rs"
 [[example]]
 name = "async_runner"
 path = "examples/async_runner.rs"
+
+[[example]]
+name = "gpu_to_ane"
+path = "examples/gpu_to_ane.rs"

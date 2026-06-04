@@ -42,19 +42,36 @@ rust_2018_idioms        = { level = "warn", priority = -1 }
 unexpected_cfgs         = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [workspace.lints.clippy]
-pedantic                     = { level = "warn", priority = -1 }
-nursery                      = { level = "warn", priority = -1 }
-cargo                        = { level = "warn", priority = -1 }
-undocumented_unsafe_blocks   = "deny"
-multiple_unsafe_ops_per_block = "deny"
-missing_safety_doc           = "deny"
-# Justified allows:
-#   These fight the FFI boundary or are stylistic noise that doesn't carry
-#   information. Anything truly informative stays a warning.
-module_name_repetitions = "allow"
-missing_errors_doc      = "allow"
-missing_panics_doc      = "allow"
-must_use_candidate      = "allow"
-missing_const_for_fn    = "allow"   # const-eval can't see through FFI
-multiple_crate_versions = "allow"   # transitive dep duplication is upstream
-cargo_common_metadata   = "allow"   # repo-level metadata applied separately
+pedantic                     = { level = "deny", priority = -1 }
+nursery                      = { level = "deny", priority = -1 }
+cargo                        = { level = "deny", priority = -1 }
+restriction                  = { level = "deny", priority = -1 }
+# The `restriction` group contains lints that are mutually
+# contradictory with the default-on group (e.g. `implicit_return`
+# fights `needless_return`) or that nuke universal Rust idiom (e.g.
+# `min_ident_chars` forbids `|x| x + 1`). Each entry below names the
+# exact reason; nothing else is allowed.
+blanket_clippy_restriction_lints = "allow"  # we deliberately enable the group
+implicit_return               = "allow"     # contradicts `needless_return` (warn-by-default)
+question_mark_used            = "allow"     # `?` is idiomatic error propagation
+single_call_fn                = "allow"     # tiny helpers are clearer than inlining
+min_ident_chars               = "allow"     # short closure params (`|x|`) are universal idiom
+absolute_paths                = "allow"     # `core::ptr::null_mut()` etc. are clearer than imports
+mod_module_files              = "allow"     # we use `lib.rs`, not `mod.rs`
+self_named_module_files       = "allow"     # paired with `mod_module_files`
+arbitrary_source_item_ordering = "allow"    # alphabetical ordering costs grouping clarity
+ref_patterns                  = "allow"     # `&raw const` uses ref patterns by design
+pub_use                       = "allow"     # re-exporting from `sys` at the crate root is the API
+exhaustive_structs            = "allow"     # FFI `repr(C)` structs ARE the C ABI; `#[non_exhaustive]` would break construction
+exhaustive_enums              = "allow"     # FFI enums match a fixed C contract; non-exhaustive would defeat the purpose
+multiple_crate_versions       = "allow"     # transitive dep duplication is upstream, not under our control
+missing_inline_in_public_items = "allow"    # blanket `#[inline]` on every pub fn defeats LLVM's cross-crate inliner heuristics
+semicolon_outside_block       = "allow"     # contradicts `semicolon_inside_block`; both styles are idiomatic
+semicolon_inside_block        = "allow"     # contradicts `semicolon_outside_block`; both styles are idiomatic
+semicolon_if_nothing_returned = "allow"     # paired with `; inside` style — last stmt may legitimately be expression
+unseparated_literal_suffix    = "allow"     # contradicts `separated_literal_suffix` — we use `0_usize` for clarity at numeric boundaries
+multiple_inherent_impl        = "allow"     # grouping methods by capability (open/run/buffers/...) across `impl` blocks is clearer than one wall
+error_impl_error              = "allow"     # `Error` IS the idiomatic public name for a crate's error type
+missing_trait_methods         = "allow"     # `Error`'s `source`/`description`/`cause`/`provide`/`type_id` defaults are deliberate
+non_ascii_literal             = "allow"     # doctest output strings may contain unicode (e.g. ANE telemetry labels)
+default_numeric_fallback      = "allow"     # `0` / `1` literals in math have unambiguous inferred types; verbose suffixes hurt readability

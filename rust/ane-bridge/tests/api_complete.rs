@@ -5,11 +5,55 @@
 //! A drift on any side fails the build — keeping the three sources of
 //! truth in lockstep is the whole point of the bridge.
 
+#![allow(
+    clippy::allow_attributes,
+    clippy::allow_attributes_without_reason,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::as_conversions,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::dbg_macro,
+    clippy::missing_panics_doc,
+    clippy::missing_errors_doc,
+    clippy::missing_assert_message,
+    clippy::missing_docs_in_private_items,
+    clippy::tests_outside_test_module,
+    clippy::std_instead_of_core,
+    clippy::std_instead_of_alloc,
+    clippy::separated_literal_suffix,
+    clippy::unseparated_literal_suffix,
+    clippy::unreadable_literal,
+    clippy::shadow_unrelated,
+    clippy::shadow_reuse,
+    clippy::shadow_same,
+    clippy::min_ident_chars,
+    clippy::float_arithmetic,
+    clippy::float_cmp,
+    clippy::arithmetic_side_effects,
+    clippy::integer_division,
+    clippy::default_numeric_fallback,
+    clippy::pattern_type_mismatch,
+    clippy::if_then_some_else_none,
+    clippy::single_call_fn,
+    clippy::needless_pass_by_value,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::redundant_pub_crate,
+    clippy::semicolon_outside_block,
+    clippy::semicolon_inside_block,
+    clippy::semicolon_if_nothing_returned,
+    clippy::cast_precision_loss,
+    reason = "integration tests use idiomatic `.unwrap()` / indexing / `as` / \
+              `println!` — assertion failure IS the test failure mode"
+)]
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const HEADER_REL:  &str = "../../c/include/ane_bridge.h";
+const HEADER_REL: &str = "../../c/include/ane_bridge.h";
 const SYS_LIB_REL: &str = "../ane-bridge-sys/src/lib.rs";
 
 fn manifest_dir() -> PathBuf {
@@ -18,8 +62,7 @@ fn manifest_dir() -> PathBuf {
 
 fn read(rel: &str) -> String {
     let path = manifest_dir().join(rel);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
 /// Pull function names matching `ane_<name>(` from a string, excluding the
@@ -81,9 +124,13 @@ fn extract_dylib_exports(dylib: &Path) -> BTreeSet<String> {
     assert!(out.status.success(), "nm failed: {:?}", out.status);
     let mut set = BTreeSet::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let Some(sym) = line.split_whitespace().last() else { continue };
+        let Some(sym) = line.split_whitespace().last() else {
+            continue;
+        };
         // macOS prefixes external symbols with `_`.
-        let Some(stripped) = sym.strip_prefix("_ane_") else { continue };
+        let Some(stripped) = sym.strip_prefix("_ane_") else {
+            continue;
+        };
         if stripped.starts_with("internal_") {
             continue;
         }
@@ -99,10 +146,10 @@ fn extract_dylib_exports(dylib: &Path) -> BTreeSet<String> {
 #[test]
 fn header_matches_rust_ffi() {
     let header_fns = extract_functions(&read(HEADER_REL), "ane_");
-    let sys_fns    = extract_functions(&read(SYS_LIB_REL), "ane_");
+    let sys_fns = extract_functions(&read(SYS_LIB_REL), "ane_");
 
     let only_in_header: Vec<_> = header_fns.difference(&sys_fns).collect();
-    let only_in_sys:    Vec<_> = sys_fns.difference(&header_fns).collect();
+    let only_in_sys: Vec<_> = sys_fns.difference(&header_fns).collect();
 
     assert!(
         only_in_header.is_empty() && only_in_sys.is_empty(),
@@ -117,11 +164,11 @@ fn dylib_exports_match_header() {
         eprintln!("dylib not built; run `make` to enable this assertion. Skipping.");
         return;
     };
-    let header_fns  = extract_functions(&read(HEADER_REL), "ane_");
-    let dylib_syms  = extract_dylib_exports(&dylib);
+    let header_fns = extract_functions(&read(HEADER_REL), "ane_");
+    let dylib_syms = extract_dylib_exports(&dylib);
 
     let header_missing: Vec<_> = header_fns.difference(&dylib_syms).collect();
-    let dylib_extra:    Vec<_> = dylib_syms.difference(&header_fns).collect();
+    let dylib_extra: Vec<_> = dylib_syms.difference(&header_fns).collect();
 
     assert!(
         header_missing.is_empty(),

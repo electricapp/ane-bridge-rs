@@ -26,7 +26,7 @@ LDFLAGS_BIN   := -Wl,-rpath,@executable_path/../lib -L$(LIB_DIR) -lane_bridge \
 SRCS          := $(SRC_DIR)/ane_private.m $(SRC_DIR)/ane_bridge.m
 DYLIB         := $(LIB_DIR)/libane_bridge.dylib
 
-EXAMPLES      := $(BIN_DIR)/identity $(BIN_DIR)/zero_copy
+EXAMPLES      := $(BIN_DIR)/identity $(BIN_DIR)/zero_copy $(BIN_DIR)/gpu_to_ane $(BIN_DIR)/chain_identity $(BIN_DIR)/chain_file $(BIN_DIR)/ane_vs_sme
 
 .PHONY: all examples test clean rust rust-test inspect probe-shapes
 
@@ -41,6 +41,16 @@ examples: $(EXAMPLES)
 $(BIN_DIR)/%: $(EXAMPLES_DIR)/%.c $(DYLIB)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS_BIN)
+
+$(BIN_DIR)/gpu_to_ane: $(EXAMPLES_DIR)/gpu_to_ane.m $(DYLIB)
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS) -fobjc-arc -framework Metal -o $@ $< $(LDFLAGS_BIN)
+
+$(BIN_DIR)/ane_vs_sme: $(EXAMPLES_DIR)/ane_vs_sme.m $(DYLIB)
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS) -fobjc-arc \
+	    -DACCELERATE_NEW_LAPACK -framework Accelerate \
+	    -o $@ $< $(LDFLAGS_BIN)
 
 test: examples
 	@uv run --project .. python tools/make_identity_model.py $(PREFIX)/identity || \

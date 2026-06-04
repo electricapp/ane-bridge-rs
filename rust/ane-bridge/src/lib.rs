@@ -42,25 +42,35 @@
 //!   library — protect with your own synchronization.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
-// FFI-heavy code legitimately needs lossy/widening casts at the C boundary.
-// The library's pointer/owner discipline is documented per-callsite via
-// `// SAFETY:` comments; the broader pedantic group remains a warning.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
-    clippy::ptr_as_ptr
+    clippy::ptr_as_ptr,
+    reason = "FFI-heavy code legitimately needs lossy/widening casts at the C boundary; \
+              the library's pointer/owner discipline is documented per-callsite via \
+              `// SAFETY:` comments"
 )]
 
+extern crate alloc;
+
+use alloc::ffi::CString;
+use alloc::sync::Arc;
 use core::ffi::{CStr, c_char, c_void};
 use core::ptr;
-use std::ffi::CString;
 use std::path::Path;
-use std::sync::Arc;
 
 /// Convert a `&Path` to a `CString`, going through the OS-string bytes
 /// directly (so non-UTF-8 paths still work on Unix). On macOS this is
 /// effectively a `as_os_str().as_bytes()` round-trip.
+///
+/// # Panics
+/// Panics if the path bytes contain an interior NUL — POSIX paths
+/// cannot contain NUL by definition, so this is a programmer error.
+#[expect(
+    clippy::expect_used,
+    reason = "NUL in a filesystem path is a programmer error and is documented to panic"
+)]
 fn path_to_cstring(p: &Path) -> CString {
     use std::os::unix::ffi::OsStrExt as _;
     CString::new(p.as_os_str().as_bytes()).expect("path must not contain NUL byte")
@@ -83,8 +93,8 @@ pub struct Error {
     pub message: String,
 }
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         if self.message.is_empty() {
             f.write_str(self.status.short_name())
         } else {
@@ -92,10 +102,10 @@ impl std::fmt::Display for Error {
         }
     }
 }
-impl std::error::Error for Error {}
+impl core::error::Error for Error {}
 
 /// Crate-wide `Result` alias.
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Error>;
 
 /// Convert a C-side status into a `Result`, capturing the thread-local
 /// error message on the failure branch.
@@ -139,7 +149,7 @@ pub trait ShortName {
 
 impl ShortName for sys::AneStatus {
     fn short_name(&self) -> &'static str {
-        match self {
+        match *self {
             Self::Ok => "ok",
             Self::InvalidArg => "invalid argument",
             Self::Io => "I/O error",
@@ -158,7 +168,7 @@ impl ShortName for sys::AneStatus {
 
 impl ShortName for sys::AneDtype {
     fn short_name(&self) -> &'static str {
-        match self {
+        match *self {
             Self::Fp32 => "fp32",
             Self::Fp16 => "fp16",
             Self::Int32 => "i32",
@@ -171,7 +181,7 @@ impl ShortName for sys::AneDtype {
 
 impl ShortName for sys::AneQoS {
     fn short_name(&self) -> &'static str {
-        match self {
+        match *self {
             Self::Default => "default",
             Self::UserInteractive => "user-interactive",
             Self::UserInitiated => "user-initiated",
@@ -197,18 +207,22 @@ impl<T: Copy + ShortName> core::fmt::Display for Display<T> {
 /// assert_eq!(display(Dtype::Fp16).to_string(), "fp16");
 /// ```
 #[must_use]
-pub fn display<T: Copy + ShortName>(v: T) -> Display<T> {
+pub const fn display<T: Copy + ShortName>(v: T) -> Display<T> {
     Display(v)
 }
 
 /// Bridge version string.
+#[must_use]
 pub fn version() -> &'static str {
     // SAFETY:
     // `ane_bridge_version` is a no-arg C function returning a pointer
     // to a `static const char[]` string literal in the library
     // (`#define ANE_BRIDGE_VERSION "..."`). It is never null.
     let p = unsafe { sys::ane_bridge_version() };
-    debug_assert!(!p.is_null());
+    debug_assert!(
+        !p.is_null(),
+        "ane_bridge_version must return a static string"
+    );
     // SAFETY:
     // `p` points to a `static const char[]` with program lifetime, so
     // promoting the borrow to `&'static str` is sound. UTF-8 is
@@ -225,8 +239,11 @@ pub fn version() -> &'static str {
 /// [`Model::input`] / [`Model::output`].
 #[derive(Clone, Debug)]
 pub struct TensorSpec {
+    /// Framework-supplied tensor name (matches the MIL IR identifier).
     name: String,
+    /// Element type of the tensor's contiguous buffer.
     dtype: Dtype,
+    /// Logical shape in element units. May contain -1 for ANE-internal axes.
     shape: Vec<i64>,
 }
 
@@ -272,22 +289,26 @@ impl TensorSpec {
     /// the loaded model), but this constructor is useful for tests
     /// and for cross-checking against [`Model::input`] /
     /// [`Model::output`].
+    #[must_use]
     pub fn new(name: &str, dtype: Dtype, shape: &[i64]) -> Self {
         Self {
-            name: name.to_string(),
+            name: name.to_owned(),
             dtype,
             shape: shape.to_vec(),
         }
     }
     /// Element type.
-    pub fn dtype(&self) -> Dtype {
+    #[must_use]
+    pub const fn dtype(&self) -> Dtype {
         self.dtype
     }
     /// Borrowed shape as `[i64]`.
+    #[must_use]
     pub fn shape(&self) -> &[i64] {
         &self.shape
     }
     /// Informational tensor name.
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -300,6 +321,7 @@ impl TensorSpec {
     /// spec." If we instead wrapped, a caller could allocate a tiny
     /// `Buffer` for what should be a huge tensor and let the ANE
     /// write past its end.
+    #[must_use]
     pub fn nbytes(&self) -> usize {
         // SAFETY:
         // `ane_dtype_size` is a pure function over a `#[repr(C)]`
@@ -326,8 +348,11 @@ impl TensorSpec {
 /// returns, query them via [`Model::input`] / [`Model::output`].
 #[derive(Clone, Debug)]
 pub struct OpenOptions {
+    /// Filesystem path to the `.mil` program.
     mil_path: CString,
+    /// Filesystem path to the weights blob referenced by the program.
     weights_path: CString,
+    /// `QoS` class used while the model compiles + loads on the daemon.
     qos: QoS,
 }
 
@@ -346,7 +371,7 @@ impl OpenOptions {
     }
     /// Override the `QoS` used during compile + load.
     #[must_use]
-    pub fn qos(mut self, qos: QoS) -> Self {
+    pub const fn qos(mut self, qos: QoS) -> Self {
         self.qos = qos;
         self
     }
@@ -359,22 +384,27 @@ impl OpenOptions {
 /// Internal owned handle. Separated from `Model` so `Model` can be
 /// cheaply cloneable via `Arc`.
 struct ModelInner {
+    /// Owning FFI handle. Released by `Drop` on the last `Arc` decrement.
     raw: *mut sys::AneModel,
 }
 
 // SAFETY:
-// The C-side `AneModel` is read-only after `ane_model_open` returns: it
-// owns immutable `NSData` MIL + weights blobs, an immutable schema, and
-// the compiled+loaded `_ANEInMemoryModel` + `_ANEClient`. We never
-// mutate any model field after open. Apple's framework serializes
-// hardware access internally when distinct threads submit through
-// distinct `_ANERequest`s, which is the discipline we enforce. The
-// destructor (`ane_model_close`) runs exactly once because
+// The C-side `AneModel` is effectively immutable after `ane_model_open`
+// returns: it owns immutable `NSData` MIL + weights blobs, an immutable
+// schema, and the compiled+loaded `_ANEInMemoryModel` + `_ANEClient`.
+// The only two fields that change post-open are `perf_stats_mask` (via
+// `Model::set_perf_stats_mask`) and `loaded` (via `Model::unload`);
+// both are `_Atomic` on the C side, so concurrent `&self` access to
+// them from multiple threads is not a data race, and the underlying
+// objc messages are serialized by the framework. Apple's framework
+// serializes hardware access internally when distinct threads submit
+// through distinct `_ANERequest`s, which is the discipline we enforce.
+// The destructor (`ane_model_close`) runs exactly once because
 // `Arc::drop` only fires on the last reference.
 unsafe impl Send for ModelInner {}
-// SAFETY: see the `Send` impl just above — `ModelInner` is read-only
-// after construction and the C side handles concurrent eval safely
-// against the same model.
+// SAFETY: see the `Send` impl just above — every post-open mutation
+// goes through an atomic field, and the C side handles concurrent eval
+// safely against the same model.
 unsafe impl Sync for ModelInner {}
 
 impl Drop for ModelInner {
@@ -388,7 +418,9 @@ impl Drop for ModelInner {
             // released. `ane_model_close` accepts the resulting
             // exclusive ownership and is documented to handle null
             // (we check anyway for defensive symmetry).
-            unsafe { sys::ane_model_close(self.raw) };
+            unsafe {
+                sys::ane_model_close(self.raw);
+            }
         }
     }
 }
@@ -396,12 +428,14 @@ impl Drop for ModelInner {
 /// A compiled, loaded model. Cheap to clone (`Arc`); share across threads.
 #[derive(Clone)]
 pub struct Model {
+    /// Reference-counted owning handle — clones share the same model.
     inner: Arc<ModelInner>,
 }
 
-impl std::fmt::Debug for Model {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Model {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Model")
+            .field("inner", &self.inner.raw)
             .field("num_inputs", &self.num_inputs())
             .field("num_outputs", &self.num_outputs())
             .finish()
@@ -410,6 +444,10 @@ impl std::fmt::Debug for Model {
 
 impl Model {
     /// Compile and load a model.
+    ///
+    /// # Errors
+    /// Returns the framework-reported error if the MIL fails to compile,
+    /// the weights blob can't be read, or `aned` rejects the load.
     pub fn open(opts: &OpenOptions) -> Result<Self> {
         let copts = sys::AneModelOpenOptions {
             mil_path: opts.mil_path.as_ptr(),
@@ -444,6 +482,7 @@ impl Model {
     }
 
     /// Number of declared inputs.
+    #[must_use]
     pub fn num_inputs(&self) -> i32 {
         // SAFETY:
         // `inner.raw` is a valid model handle for the lifetime of
@@ -453,16 +492,19 @@ impl Model {
         unsafe { sys::ane_model_num_inputs(self.inner.raw) }
     }
     /// Number of declared outputs.
+    #[must_use]
     pub fn num_outputs(&self) -> i32 {
         // SAFETY: see `num_inputs`.
         unsafe { sys::ane_model_num_outputs(self.inner.raw) }
     }
     /// Total bytes of input `idx`. 0 if `idx` is out of range.
+    #[must_use]
     pub fn input_nbytes(&self, idx: i32) -> usize {
         // SAFETY: see `num_inputs`; the C side range-checks `idx`.
         unsafe { sys::ane_model_input_nbytes(self.inner.raw, idx) }
     }
     /// Total bytes of output `idx`. 0 if `idx` is out of range.
+    #[must_use]
     pub fn output_nbytes(&self, idx: i32) -> usize {
         // SAFETY: see `num_inputs`; the C side range-checks `idx`.
         unsafe { sys::ane_model_output_nbytes(self.inner.raw, idx) }
@@ -478,6 +520,7 @@ impl Model {
     /// survives across processes but not aned restarts or its opaque
     /// eviction policy, so a `false` here just means "we paid the full
     /// compile this time" — not that anything went wrong.
+    #[must_use]
     pub fn was_cached(&self) -> bool {
         // SAFETY: see `num_inputs`; the C accessor is a pure read of a
         // bool set at open time and never mutated afterwards.
@@ -486,12 +529,14 @@ impl Model {
 
     /// Framework-derived schema for input `idx`. Returns `None` if
     /// the index is out of range.
+    #[must_use]
     pub fn input(&self, idx: i32) -> Option<TensorSpec> {
         // SAFETY: const pointer to a read-only model; C does the range check.
         let p = unsafe { sys::ane_model_input_spec(self.inner.raw, idx) };
         tensor_spec_from_raw(p)
     }
     /// Framework-derived schema for output `idx`.
+    #[must_use]
     pub fn output(&self, idx: i32) -> Option<TensorSpec> {
         // SAFETY: see `input`.
         let p = unsafe { sys::ane_model_output_spec(self.inner.raw, idx) };
@@ -500,9 +545,13 @@ impl Model {
 
     /// Allocate a fresh request bound to this model. The model is kept
     /// alive (via `Arc`) for the lifetime of the request.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::Oom`] if allocation fails or a framework
+    /// error if `ane_request_create` rejects the model.
     pub fn request(&self) -> Result<Request> {
-        let n_in = self.num_inputs().max(0) as usize;
-        let n_out = self.num_outputs().max(0) as usize;
+        let n_in = usize::try_from(self.num_inputs().max(0)).unwrap_or(0);
+        let n_out = usize::try_from(self.num_outputs().max(0)).unwrap_or(0);
         let mut raw: *mut sys::AneRequest = ptr::null_mut();
         // SAFETY:
         // `inner.raw` is a valid model handle. `ane_request_create`
@@ -532,6 +581,10 @@ impl Model {
     }
 
     /// Allocate a fresh `IOSurface`-backed buffer of `nbytes`.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::Oom`] if the kernel refuses the
+    /// `IOSurfaceCreate` request, or a framework error otherwise.
     pub fn buffer(&self, nbytes: usize) -> Result<Buffer> {
         let mut raw: *mut sys::AneBuffer = ptr::null_mut();
         // SAFETY:
@@ -549,6 +602,10 @@ impl Model {
     }
 
     /// Allocate a buffer sized for input `idx`.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::InvalidArg`] for an out-of-range `idx`,
+    /// or [`sys::AneStatus::Oom`] / framework error otherwise.
     pub fn input_buffer(&self, idx: i32) -> Result<Buffer> {
         let mut raw: *mut sys::AneBuffer = ptr::null_mut();
         // SAFETY: see `buffer`. `idx` is range-checked by the C side.
@@ -564,6 +621,10 @@ impl Model {
     }
 
     /// Allocate a buffer sized for output `idx`.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::InvalidArg`] for an out-of-range `idx`,
+    /// or [`sys::AneStatus::Oom`] / framework error otherwise.
     pub fn output_buffer(&self, idx: i32) -> Result<Buffer> {
         let mut raw: *mut sys::AneBuffer = ptr::null_mut();
         // SAFETY: see `buffer`. `idx` is range-checked by the C side.
@@ -586,6 +647,7 @@ impl Model {
 
 /// `IOSurface`-backed buffer. Drop releases the underlying surface.
 pub struct Buffer {
+    /// Owning FFI handle to an `IOSurface`-backed buffer.
     raw: *mut sys::AneBuffer,
 }
 
@@ -600,11 +662,13 @@ unsafe impl Send for Buffer {}
 
 impl Buffer {
     /// Buffer size in bytes.
+    #[must_use]
     pub fn nbytes(&self) -> usize {
         // SAFETY: `self.raw` is non-null and owned by `self`.
         unsafe { sys::ane_buffer_nbytes(self.raw) }
     }
     /// Underlying `IOSurfaceID` for advanced inter-process use.
+    #[must_use]
     pub fn iosurface_id(&self) -> u32 {
         // SAFETY: see `nbytes`.
         unsafe { sys::ane_buffer_iosurface_id(self.raw) }
@@ -613,11 +677,13 @@ impl Buffer {
     /// Run `f` while the buffer is locked for host access. The slice
     /// passed to `f` is the entire mapped `IOSurface`; do not let it
     /// escape the closure — it becomes invalid after unlock.
-    pub fn with_locked<R>(
-        &mut self,
-        access: BufferAccess,
-        body: impl FnOnce(&mut [u8]) -> R,
-    ) -> Result<R> {
+    ///
+    /// # Errors
+    /// Forwards any error from [`Self::lock`].
+    pub fn with_locked<R, F>(&mut self, access: BufferAccess, body: F) -> Result<R>
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
         let mut guard = self.lock(access)?;
         Ok(body(&mut guard))
     }
@@ -643,7 +709,10 @@ impl Buffer {
         let status = unsafe { sys::ane_buffer_lock(self.raw, access, &raw mut base_ptr) };
         check(status)?;
         let size = self.nbytes();
-        debug_assert!(!base_ptr.is_null());
+        debug_assert!(
+            !base_ptr.is_null(),
+            "ane_buffer_lock returned OK with null base pointer"
+        );
         Ok(LockGuard {
             buf: self,
             base: base_ptr.cast::<u8>(),
@@ -652,7 +721,7 @@ impl Buffer {
     }
 
     /// Internal: raw handle for binding into a request.
-    pub(crate) fn raw(&self) -> *mut sys::AneBuffer {
+    pub(crate) const fn raw(&self) -> *mut sys::AneBuffer {
         self.raw
     }
 }
@@ -662,22 +731,25 @@ impl Buffer {
 ///
 /// The guard borrows the buffer mutably, so the borrow checker
 /// prevents concurrent locking or rebinding for its lifetime.
-pub struct LockGuard<'a> {
-    buf: &'a mut Buffer,
+pub struct LockGuard<'buf> {
+    /// Borrowed buffer; the `&mut` excludes any concurrent lock.
+    buf: &'buf mut Buffer,
+    /// Mapped base address returned by `ane_buffer_lock`.
     base: *mut u8,
+    /// Mapped byte length (matches `Buffer::nbytes`).
     len: usize,
 }
 
 impl LockGuard<'_> {
     /// Length of the locked mapping in bytes.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.len
     }
     /// Returns `true` if the mapping is zero-sized (would only happen
     /// for a buffer allocated with `nbytes == 0`).
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len == 0
     }
 }
@@ -687,7 +759,7 @@ impl core::ops::Deref for LockGuard<'_> {
     fn deref(&self) -> &[u8] {
         // SAFETY:
         // `self.base` was produced by `ane_buffer_lock` on
-        // `self.buf.raw`, which we hold via `&'a mut Buffer`. The
+        // `self.buf.raw`, which we hold via `&'buf mut Buffer`. The
         // mapping is valid for `self.len` bytes for the entire
         // lifetime of `self` (the C lock count is non-zero until
         // `Drop` calls `ane_buffer_unlock`). The `&mut Buffer`
@@ -713,7 +785,7 @@ impl Drop for LockGuard<'_> {
         // ignore any error: a failure here is rare and there is
         // nowhere to surface it inside `Drop`. The next `lock`
         // call on the same buffer would surface it.
-        let _ = unsafe { sys::ane_buffer_unlock(self.buf.raw) };
+        let _unlock_status: sys::AneStatus = unsafe { sys::ane_buffer_unlock(self.buf.raw) };
     }
 }
 
@@ -725,7 +797,9 @@ impl Drop for Buffer {
             // and has not been released — release happens exactly
             // here when the `Buffer` is dropped, which `Buffer`'s
             // single-owner type (no `Clone` impl) makes a one-shot.
-            unsafe { sys::ane_buffer_release(self.raw) };
+            unsafe {
+                sys::ane_buffer_release(self.raw);
+            }
         }
     }
 }
@@ -737,31 +811,37 @@ impl Drop for Buffer {
 /// Type-erased completion closure. Boxed and pointed to by the C-side
 /// `user` arg; freed when the `Request` is dropped or a new callback
 /// replaces it.
-type Callback = Box<dyn FnMut(std::result::Result<(), Error>) + Send + 'static>;
+type Callback = Box<dyn FnMut(core::result::Result<(), Error>) + Send + 'static>;
 
 /// One in-flight (or idle) inference unit. Each request owns a serial
 /// dispatch queue on the C side; submit dispatches an eval onto it.
 pub struct Request {
+    /// Owning FFI handle.
     raw: *mut sys::AneRequest,
-    // Keep the parent model alive for at least as long as the request.
+    /// Keep the parent model alive for at least as long as the request.
     _model: Model,
-    // Owning box for the registered completion closure (if any). We
-    // keep a *mut so the address handed to C is stable across moves;
-    // freed in `Drop` or when replaced.
+    /// Owning box for the registered completion closure (if any). We
+    /// keep a `*mut` so the address handed to C is stable across moves;
+    /// freed in `Drop` or when replaced.
     callback: Option<*mut Callback>,
-    // Bindings: Rust must keep the `Buffer` alive for the entire
-    // lifetime of the request, since the C side stores raw pointers
-    // into them in `r->input_bound`/`r->output_bound` and dereferences
-    // those on every `submit`. Without this, a caller could drop the
-    // buffer immediately after `bind_*` returned and trigger a UAF.
-    //
-    // The vectors are sized once at request creation and are
-    // append-replaced (each `bind_*(idx, buf)` overwrites slot `idx`).
+    /// Bindings: Rust must keep each `Buffer` alive for the entire
+    /// lifetime of the request, since the C side stores raw pointers
+    /// into them in `r->input_bound` and dereferences those on every
+    /// `submit`. Without this, a caller could drop the buffer
+    /// immediately after `bind_*` returned and trigger a UAF.
+    ///
+    /// The vector is sized once at request creation and is append-replaced
+    /// (each `bind_input(idx, buf)` overwrites slot `idx`).
     bound_inputs: Vec<Option<Buffer>>,
+    /// Output bindings — same lifetime/append-replace discipline as
+    /// `bound_inputs`, mirroring `r->output_bound` on the C side.
     bound_outputs: Vec<Option<Buffer>>,
-    // Optional per-request configuration retained for lifetime ownership.
+    /// Optional separate weights buffer, retained so the C side's
+    /// borrowed pointer stays valid for the request's lifetime.
     weights_buf: Option<Buffer>,
+    /// Optional perf-stats sink bound for the request's lifetime.
     perf_stats: Option<PerfStats>,
+    /// Optional shared-events handle bound for the request's lifetime.
     shared_events: Option<SharedEvents>,
 }
 
@@ -791,6 +871,10 @@ impl Request {
     /// trust its return: if it accepted `idx`, then `idx` is in
     /// `[0, bound_inputs.len())` — the same invariant the Vec was
     /// sized with at `Request::create`.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::InvalidArg`] for out-of-range `idx`,
+    /// dtype/shape mismatch, or a negative input index.
     pub fn bind_input(&mut self, idx: i32, buf: Buffer) -> Result<()> {
         // SAFETY:
         // - `self.raw` is a valid request handle.
@@ -799,27 +883,52 @@ impl Request {
         //   stays valid for the Request's lifetime.
         // - On error we drop `buf` here and the C side never recorded
         //   any pointer to it (the C check happens before the store).
-        unsafe { check(sys::ane_request_bind_input(self.raw, idx, buf.raw()))? };
+        unsafe {
+            check(sys::ane_request_bind_input(self.raw, idx, buf.raw()))?;
+        }
         // The C check just confirmed `0 <= idx < num_inputs`, and
-        // `bound_inputs.len() == num_inputs`, so the cast + index is
-        // in-bounds. We use `debug_assert` to keep a non-panic
+        // `bound_inputs.len() == num_inputs`, so the conversion + index
+        // is in-bounds. We use `debug_assert` to keep a non-panic
         // tripwire if those invariants ever drift.
-        let slot = idx as usize;
-        debug_assert!(slot < self.bound_inputs.len());
+        let slot = usize::try_from(idx).map_err(|_neg| Error {
+            status: sys::AneStatus::InvalidArg,
+            message: alloc::format!("negative input index {idx}"),
+        })?;
+        debug_assert!(
+            slot < self.bound_inputs.len(),
+            "input slot {slot} out of range (have {})",
+            self.bound_inputs.len()
+        );
         // Replace last so the previous Buffer's Drop fires only after
         // the C side has rebound to the new pointer.
-        self.bound_inputs[slot] = Some(buf);
+        if let Some(cell) = self.bound_inputs.get_mut(slot) {
+            *cell = Some(buf);
+        }
         Ok(())
     }
 
     /// Bind a buffer for output `idx`. Same ownership rules as
     /// [`Self::bind_input`].
+    ///
+    /// # Errors
+    /// Same as [`Self::bind_input`].
     pub fn bind_output(&mut self, idx: i32, buf: Buffer) -> Result<()> {
         // SAFETY: see `bind_input`.
-        unsafe { check(sys::ane_request_bind_output(self.raw, idx, buf.raw()))? };
-        let slot = idx as usize;
-        debug_assert!(slot < self.bound_outputs.len());
-        self.bound_outputs[slot] = Some(buf);
+        unsafe {
+            check(sys::ane_request_bind_output(self.raw, idx, buf.raw()))?;
+        }
+        let slot = usize::try_from(idx).map_err(|_neg| Error {
+            status: sys::AneStatus::InvalidArg,
+            message: alloc::format!("negative output index {idx}"),
+        })?;
+        debug_assert!(
+            slot < self.bound_outputs.len(),
+            "output slot {slot} out of range (have {})",
+            self.bound_outputs.len()
+        );
+        if let Some(cell) = self.bound_outputs.get_mut(slot) {
+            *cell = Some(buf);
+        }
         Ok(())
     }
 
@@ -855,6 +964,10 @@ impl Request {
     /// Byte-slice fast path: library memcpys `data` into an internal
     /// `IOSurface` for input `idx`. Convenient but copies; use
     /// [`Self::bind_input`] for hot loops.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::InvalidArg`] for out-of-range `idx` or
+    /// `data.len()` not matching the input's `nbytes`.
     pub fn set_input_bytes(&mut self, idx: i32, data: &[u8]) -> Result<()> {
         // SAFETY:
         // - `self.raw` valid (see `bind_input`).
@@ -873,6 +986,11 @@ impl Request {
 
     /// Byte-slice fast path: copy output `idx` into `out`. Only valid
     /// after the request has completed.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::NotDone`] if called before completion,
+    /// or [`sys::AneStatus::InvalidArg`] for an out-of-range `idx` or
+    /// `out.len()` not matching the output's `nbytes`.
     pub fn get_output_bytes(&mut self, idx: i32, out: &mut [u8]) -> Result<()> {
         // SAFETY:
         // - `self.raw` valid (see `bind_input`).
@@ -890,6 +1008,10 @@ impl Request {
     }
 
     /// Enqueue an evaluation. Non-blocking; returns immediately.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::Busy`] if a previous submission has not
+    /// yet drained, or the framework error from the dispatch call.
     pub fn submit(&mut self, qos: QoS) -> Result<()> {
         // SAFETY:
         // `self.raw` is valid. The C-side atomic `in_flight` rejects
@@ -900,18 +1022,26 @@ impl Request {
     }
 
     /// Block until the in-flight submission completes.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::Timeout`] if the timeout elapses, or
+    /// the eval's recorded error on completion.
     pub fn wait(&mut self, timeout_ms: i32) -> Result<()> {
         // SAFETY: `self.raw` valid; semaphore wait is internally safe.
         unsafe { check(sys::ane_request_wait(self.raw, timeout_ms)) }
     }
 
     /// Non-blocking completion check.
+    #[must_use]
     pub fn is_done(&self) -> bool {
         // SAFETY: const pointer to a request we own; atomic load only.
         unsafe { sys::ane_request_is_done(self.raw) }
     }
 
     /// Submit + wait. Returns when the eval is done (or has failed).
+    ///
+    /// # Errors
+    /// Same conditions as [`Self::submit`] and [`Self::wait`].
     pub fn run(&mut self, qos: QoS) -> Result<()> {
         // SAFETY: see `submit` / `wait`.
         unsafe { check(sys::ane_request_run(self.raw, qos)) }
@@ -931,13 +1061,22 @@ impl Request {
     /// (`Busy` if a prior submission hasn't drained yet) or from the
     /// underlying [`Self::submit`].
     pub fn submit_async(&mut self, qos: QoS) -> Result<EvalFuture<'_>> {
-        let shared = std::sync::Arc::new(EvalShared::new());
-        let shared_cb = shared.clone();
+        let shared = Arc::new(EvalShared::new());
+        let shared_cb = Arc::<EvalShared>::clone(&shared);
         self.on_complete(move |result| {
             // Store the result first, then publish `done`. The future
             // uses Acquire on `done` to synchronize-with this Release,
             // so it always observes a fully-written `result`.
-            *shared_cb.result.lock().expect("eval result mutex poisoned") = Some(result);
+            // Poison recovery: the only way these mutexes could be poisoned
+            // is if a previous holder panicked while holding the guard. The
+            // worker callback is wrapped in `catch_unwind` (see
+            // `ane_bridge_eval_trampoline`) so this is unreachable, but
+            // recovering the inner guard regardless keeps the lint clean
+            // and the runtime resilient.
+            *shared_cb
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
             shared_cb
                 .done
                 .store(true, core::sync::atomic::Ordering::Release);
@@ -945,7 +1084,7 @@ impl Request {
             let waker = shared_cb
                 .waker
                 .lock()
-                .expect("eval waker mutex poisoned")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
             if let Some(w) = waker {
                 w.wake();
@@ -973,9 +1112,13 @@ impl Request {
     /// safe wrapper does not pre-check `is_done`; doing so would be
     /// a duplicate guard that could fall out of sync with the C
     /// invariant.
+    ///
+    /// # Errors
+    /// Returns the framework error if `ane_request_on_complete` rejects
+    /// the swap.
     pub fn on_complete<F>(&mut self, f: F) -> Result<()>
     where
-        F: FnMut(std::result::Result<(), Error>) + Send + 'static,
+        F: FnMut(core::result::Result<(), Error>) + Send + 'static,
     {
         let new_box: Box<Callback> = Box::new(Box::new(f));
         let new_ptr: *mut Callback = Box::into_raw(new_box);
@@ -1021,6 +1164,9 @@ impl Request {
     /// Remove any installed completion callback. Blocks if an eval is
     /// in flight (via the C `dispatch_sync` drain — same single-
     /// source-of-truth contract as [`Self::on_complete`]).
+    ///
+    /// # Errors
+    /// Returns the framework error if `ane_request_set_completion` fails.
     pub fn clear_completion(&mut self) -> Result<()> {
         // SAFETY: see `on_complete`. Pass `None` + `null` to clear.
         // The drain inside `ane_request_set_completion` ensures any
@@ -1037,6 +1183,7 @@ impl Request {
 
     /// Per-request error message captured by the worker thread on the
     /// most recent eval. Empty string if no error or no submission yet.
+    #[must_use]
     pub fn last_error(&self) -> String {
         // SAFETY:
         // `self.raw` is a valid request. `ane_request_last_error`
@@ -1064,13 +1211,20 @@ impl Request {
 /// Internal state shared between an [`EvalFuture`] and the completion
 /// callback closure that wakes it.
 struct EvalShared {
+    /// Release-stored once the worker callback has written `result`.
+    /// Polled with `Acquire` by [`EvalFuture::poll`].
     done: core::sync::atomic::AtomicBool,
+    /// Park-slot for the latest pending waker. Replaced (not stacked)
+    /// on each poll: only the most-recent task is woken.
     waker: std::sync::Mutex<Option<core::task::Waker>>,
-    result: std::sync::Mutex<Option<std::result::Result<(), Error>>>,
+    /// Final result captured by the callback. `Some` exactly once after
+    /// `done` flips, then taken by the future on its first wake-poll.
+    result: std::sync::Mutex<Option<core::result::Result<(), Error>>>,
 }
 
 impl EvalShared {
-    fn new() -> Self {
+    /// Construct an idle shared cell with all slots empty.
+    const fn new() -> Self {
         Self {
             done: core::sync::atomic::AtomicBool::new(false),
             waker: std::sync::Mutex::new(None),
@@ -1091,25 +1245,28 @@ impl EvalShared {
 /// subsequent [`Request::submit`] / [`Request::submit_async`] may
 /// return [`sys::AneStatus::Busy`].
 #[must_use = "futures do nothing until awaited"]
-pub struct EvalFuture<'r> {
-    _request: &'r mut Request,
-    shared: std::sync::Arc<EvalShared>,
+pub struct EvalFuture<'request> {
+    /// Borrowed request whose `&mut` excludes any concurrent submission.
+    _request: &'request mut Request,
+    /// Shared cell holding the `done` flag, waker, and final result.
+    shared: Arc<EvalShared>,
 }
 
 impl core::future::Future for EvalFuture<'_> {
-    type Output = std::result::Result<(), Error>;
+    type Output = core::result::Result<(), Error>;
 
     fn poll(
         self: core::pin::Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Self::Output> {
-        // Fast path: the callback already ran before this poll.
+        // Fast path: the callback already ran before this poll. Poison
+        // recovery is harmless here — see `submit_async`.
         if self.shared.done.load(core::sync::atomic::Ordering::Acquire) {
             let r = self
                 .shared
                 .result
                 .lock()
-                .expect("eval result mutex poisoned")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take()
                 .unwrap_or(Ok(()));
             return core::task::Poll::Ready(r);
@@ -1118,13 +1275,17 @@ impl core::future::Future for EvalFuture<'_> {
         // it runs. We re-check `done` after the store to close the
         // race where the callback fires between the first check and
         // the waker store.
-        *self.shared.waker.lock().expect("eval waker mutex poisoned") = Some(cx.waker().clone());
+        *self
+            .shared
+            .waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cx.waker().clone());
         if self.shared.done.load(core::sync::atomic::Ordering::Acquire) {
             let r = self
                 .shared
                 .result
                 .lock()
-                .expect("eval result mutex poisoned")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take()
                 .unwrap_or(Ok(()));
             return core::task::Poll::Ready(r);
@@ -1189,7 +1350,12 @@ extern "C" fn completion_trampoline(
 
     // Trap closure panics so unwinding never crosses the FFI boundary
     // into Obj-C, which would be undefined behavior.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (cb_ref)(result)));
+    // We deliberately drop the `Result` from `catch_unwind`: a panicking
+    // user callback is logged and swallowed so unwinding never crosses
+    // the FFI boundary into Objective-C (UB).
+    drop(std::panic::catch_unwind(core::panic::AssertUnwindSafe(
+        || (cb_ref)(result),
+    )));
 }
 
 impl Drop for Request {
@@ -1202,7 +1368,9 @@ impl Drop for Request {
             // pending callback — before any state is freed. After
             // this returns we know the C side will never read the
             // callback box again, so it is safe to drop below.
-            unsafe { sys::ane_request_release(self.raw) };
+            unsafe {
+                sys::ane_request_release(self.raw);
+            }
             self.raw = core::ptr::null_mut();
         }
         if let Some(prev) = self.callback.take() {
@@ -1236,6 +1404,10 @@ pub struct DeviceInfo {
 }
 
 /// Query the ANE device facts. Cheap; backed by `_ANEVirtualClient`.
+///
+/// # Errors
+/// Returns [`sys::AneStatus::Unsupported`] when no ANE-capable client is
+/// available, or the framework error from `_ANEVirtualClient`.
 pub fn device_info() -> Result<DeviceInfo> {
     let mut raw = sys::AneDeviceInfo {
         num_cores: 0,
@@ -1249,11 +1421,15 @@ pub fn device_info() -> Result<DeviceInfo> {
     let status = unsafe { sys::ane_device_info(&raw mut raw) };
     check(status)?;
     let arch_type = {
+        // SAFETY: `raw.arch_type` is an inline `[c_char; 32]` whose
+        // backing storage lives on the same stack frame as `raw`.
         let bytes: &[u8] = unsafe {
             core::slice::from_raw_parts(raw.arch_type.as_ptr().cast::<u8>(), raw.arch_type.len())
         };
         let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-        String::from_utf8_lossy(&bytes[..end]).into_owned()
+        // `end` is either a byte position within `bytes` (from `position`) or
+        // `bytes.len()` itself, so `get(..end)` always returns `Some`.
+        String::from_utf8_lossy(bytes.get(..end).unwrap_or(bytes)).into_owned()
     };
     Ok(DeviceInfo {
         num_cores: raw.num_cores,
@@ -1269,15 +1445,22 @@ pub fn device_info() -> Result<DeviceInfo> {
 // =============================================================
 
 /// True if `aned` has a compiled artifact for the given hex hash.
+#[must_use]
 pub fn cache_exists_for_hash(hex_hash: &str) -> bool {
-    let Ok(c) = CString::new(hex_hash) else { return false };
+    let Ok(c) = CString::new(hex_hash) else {
+        return false;
+    };
     // SAFETY: `c` lives until the call returns; the C side reads it once.
     unsafe { sys::ane_cache_exists_for_hash(c.as_ptr()) }
 }
 
 /// Evict the compiled artifact for the given hex hash from `aned`.
+///
+/// # Errors
+/// Returns [`sys::AneStatus::InvalidArg`] if `hex_hash` contains a NUL
+/// byte, or the framework error from the daemon if the eviction fails.
 pub fn cache_purge_for_hash(hex_hash: &str) -> Result<()> {
-    let c = CString::new(hex_hash).map_err(|_| Error {
+    let c = CString::new(hex_hash).map_err(|_nul| Error {
         status: sys::AneStatus::InvalidArg,
         message: "hex_hash contains NUL".into(),
     })?;
@@ -1292,12 +1475,20 @@ pub fn cache_purge_for_hash(hex_hash: &str) -> Result<()> {
 
 /// Enter the ANE real-time scheduling class for the current task.
 /// Pair with [`realtime_task_end`].
+///
+/// # Errors
+/// Returns [`sys::AneStatus::Unsupported`] if the binary lacks the
+/// required entitlement, or [`sys::AneStatus::Internal`] if the kernel
+/// rejects the transition.
 pub fn realtime_task_begin() -> Result<()> {
     // SAFETY: parameter-less FFI call.
     check(unsafe { sys::ane_realtime_task_begin() })
 }
 
 /// Leave the real-time scheduling class.
+///
+/// # Errors
+/// Same conditions as [`realtime_task_begin`].
 pub fn realtime_task_end() -> Result<()> {
     // SAFETY: parameter-less FFI call.
     check(unsafe { sys::ane_realtime_task_end() })
@@ -1319,7 +1510,9 @@ pub enum WeightSource {
 /// Builder for a single named weight entry.
 #[derive(Clone, Debug)]
 pub struct WeightEntry {
+    /// Identifier matched against MIL weight references.
     name: CString,
+    /// Where the blob lives (filesystem or in-memory).
     source: WeightSource,
 }
 
@@ -1328,6 +1521,10 @@ impl WeightEntry {
     ///
     /// # Panics
     /// Panics if `name` or `path` contain a NUL byte.
+    #[expect(
+        clippy::expect_used,
+        reason = "NUL in a weight name is a programmer error and is documented to panic"
+    )]
     pub fn from_path<S: Into<Vec<u8>>, P: AsRef<Path>>(name: S, path: P) -> Self {
         Self {
             name: CString::new(name.into()).expect("name contains NUL"),
@@ -1339,6 +1536,10 @@ impl WeightEntry {
     ///
     /// # Panics
     /// Panics if `name` contains a NUL byte.
+    #[expect(
+        clippy::expect_used,
+        reason = "NUL in a weight name is a programmer error and is documented to panic"
+    )]
     pub fn from_bytes<S: Into<Vec<u8>>>(name: S, bytes: Vec<u8>) -> Self {
         Self {
             name: CString::new(name.into()).expect("name contains NUL"),
@@ -1350,9 +1551,13 @@ impl WeightEntry {
 /// Extended open options: in-memory MIL bytes + multiple named weight blobs.
 #[derive(Clone, Debug)]
 pub struct OpenOptionsEx {
+    /// The MIL program itself (path or owned bytes).
     mil: WeightSource,
+    /// Named weight blobs referenced by the MIL program.
     weights: Vec<WeightEntry>,
+    /// `QoS` class used while the model compiles + loads on the daemon.
     qos: QoS,
+    /// When false the `mil` bytes are a legacy `NetworkDescription`.
     is_mil_model: bool,
 }
 
@@ -1368,7 +1573,8 @@ impl OpenOptionsEx {
     }
 
     /// Build options with MIL supplied as an in-memory blob.
-    pub fn from_bytes(mil_bytes: Vec<u8>) -> Self {
+    #[must_use]
+    pub const fn from_bytes(mil_bytes: Vec<u8>) -> Self {
         Self {
             mil: WeightSource::Bytes(mil_bytes),
             weights: Vec::new(),
@@ -1393,7 +1599,7 @@ impl OpenOptionsEx {
 
     /// Override the compile + load `QoS`.
     #[must_use]
-    pub fn qos(mut self, qos: QoS) -> Self {
+    pub const fn qos(mut self, qos: QoS) -> Self {
         self.qos = qos;
         self
     }
@@ -1401,11 +1607,23 @@ impl OpenOptionsEx {
     /// When false the MIL bytes are interpreted as a legacy
     /// `NetworkDescription` rather than MIL.
     #[must_use]
-    pub fn is_mil_model(mut self, yes: bool) -> Self {
+    pub const fn is_mil_model(mut self, yes: bool) -> Self {
         self.is_mil_model = yes;
         self
     }
 
+    /// Project this builder into the FFI-layout structs the C side expects.
+    /// Returns the borrowed weight-entry list alongside the main struct so
+    /// the caller can keep both alive for the duration of `ane_model_open_ex`.
+    ///
+    /// The fields `mil_path` / `mil_bytes` / `mil_nbytes` mirror the
+    /// `AneModelOpenOptionsEx` C struct; renaming for the lint would lose
+    /// the 1:1 correspondence.
+    #[expect(
+        clippy::similar_names,
+        clippy::pattern_type_mismatch,
+        reason = "C field names + default-binding-mode patterns are clearer here"
+    )]
     fn to_sys(&self) -> (sys::AneModelOpenOptionsEx, Vec<sys::AneWeightEntry>) {
         let (mil_path, mil_bytes, mil_nbytes) = match &self.mil {
             WeightSource::Path(p) => (p.as_ptr(), core::ptr::null::<c_void>(), 0usize),
@@ -1454,10 +1672,15 @@ impl OpenOptionsEx {
 /// Options for the file-based open path (`_ANEModel modelAtURL:key:`).
 #[derive(Clone, Debug)]
 pub struct OpenFileOptions {
+    /// URL/path to the compiled `.mlmodelc` or `.bundle`.
     model_url: CString,
+    /// Optional override for the daemon cache key.
     cache_key: Option<CString>,
+    /// Optional override for the daemon cache URL identifier.
     cache_url_identifier: Option<CString>,
+    /// Selector controlling how the cache identity is derived.
     identifier_source: sys::AneIdentifierSource,
+    /// `QoS` class used while the model compiles + loads on the daemon.
     qos: QoS,
 }
 
@@ -1478,6 +1701,10 @@ impl OpenFileOptions {
     /// # Panics
     /// Panics if `key` contains a NUL byte.
     #[must_use]
+    #[expect(
+        clippy::expect_used,
+        reason = "NUL in a cache key is a programmer error and is documented to panic"
+    )]
     pub fn cache_key<S: Into<Vec<u8>>>(mut self, key: S) -> Self {
         self.cache_key = Some(CString::new(key.into()).expect("cache_key contains NUL"));
         self
@@ -1488,6 +1715,10 @@ impl OpenFileOptions {
     /// # Panics
     /// Panics if `id` contains a NUL byte.
     #[must_use]
+    #[expect(
+        clippy::expect_used,
+        reason = "NUL in a cache URL identifier is a programmer error and is documented to panic"
+    )]
     pub fn cache_url_identifier<S: Into<Vec<u8>>>(mut self, id: S) -> Self {
         self.cache_url_identifier =
             Some(CString::new(id.into()).expect("cache_url_identifier contains NUL"));
@@ -1496,14 +1727,14 @@ impl OpenFileOptions {
 
     /// Choose how the cache identity is derived.
     #[must_use]
-    pub fn identifier_source(mut self, source: sys::AneIdentifierSource) -> Self {
+    pub const fn identifier_source(mut self, source: sys::AneIdentifierSource) -> Self {
         self.identifier_source = source;
         self
     }
 
     /// Override the compile + load `QoS`.
     #[must_use]
-    pub fn qos(mut self, qos: QoS) -> Self {
+    pub const fn qos(mut self, qos: QoS) -> Self {
         self.qos = qos;
         self
     }
@@ -1511,6 +1742,10 @@ impl OpenFileOptions {
 
 impl Model {
     /// Open via the extended path: in-memory MIL + multi-blob weights.
+    ///
+    /// # Errors
+    /// Same conditions as [`Self::open`], plus
+    /// [`sys::AneStatus::InvalidArg`] if a weight name is empty or NUL.
     pub fn open_ex(opts: &OpenOptionsEx) -> Result<Self> {
         let (copts, _entries) = opts.to_sys();
         let mut raw: *mut sys::AneModel = core::ptr::null_mut();
@@ -1532,10 +1767,17 @@ impl Model {
     }
 
     /// Open via the file-based path (`_ANEModel modelAtURL:key:`).
+    ///
+    /// # Errors
+    /// Returns the framework error if the bundle URL fails to parse or
+    /// the compiled artifact cannot be loaded by `aned`.
     pub fn open_file(opts: &OpenFileOptions) -> Result<Self> {
         let copts = sys::AneModelFileOpenOptions {
             model_url: opts.model_url.as_ptr(),
-            cache_key: opts.cache_key.as_ref().map_or(core::ptr::null(), |c| c.as_ptr()),
+            cache_key: opts
+                .cache_key
+                .as_ref()
+                .map_or(core::ptr::null(), |c| c.as_ptr()),
             cache_url_identifier: opts
                 .cache_url_identifier
                 .as_ref()
@@ -1559,6 +1801,10 @@ impl Model {
     }
 
     /// Open with the real-time priority class.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::Unsupported`] without the required
+    /// entitlement, or the same conditions as [`Self::open`].
     pub fn open_realtime(opts: &OpenOptions) -> Result<Self> {
         let copts = sys::AneModelOpenOptions {
             mil_path: opts.mil_path.as_ptr(),
@@ -1581,6 +1827,10 @@ impl Model {
     }
 
     /// Real-time variant of [`Model::open_ex`].
+    ///
+    /// # Errors
+    /// Same conditions as [`Self::open_ex`] plus the entitlement
+    /// requirement noted on [`Self::open_realtime`].
     pub fn open_realtime_ex(opts: &OpenOptionsEx) -> Result<Self> {
         let (copts, _entries) = opts.to_sys();
         let mut raw: *mut sys::AneModel = core::ptr::null_mut();
@@ -1599,110 +1849,128 @@ impl Model {
     }
 
     /// Number of procedures (entry points) declared by the loaded model. Always >= 1.
+    #[must_use]
     pub fn num_procedures(&self) -> i32 {
         // SAFETY: read-only access to the model handle.
         unsafe { sys::ane_model_num_procedures(self.inner.raw) }
     }
 
     /// Number of inputs for procedure `proc_idx`.
+    #[must_use]
     pub fn num_inputs_for_procedure(&self, proc_idx: i32) -> i32 {
         // SAFETY: see `num_inputs`.
         unsafe { sys::ane_model_num_inputs_for_procedure(self.inner.raw, proc_idx) }
     }
 
     /// Number of outputs for procedure `proc_idx`.
+    #[must_use]
     pub fn num_outputs_for_procedure(&self, proc_idx: i32) -> i32 {
         // SAFETY: see `num_outputs`.
         unsafe { sys::ane_model_num_outputs_for_procedure(self.inner.raw, proc_idx) }
     }
 
     /// Schema of input `idx` of procedure `proc_idx`.
+    #[must_use]
     pub fn input_for_procedure(&self, proc_idx: i32, idx: i32) -> Option<TensorSpec> {
         // SAFETY: see `input`.
-        let p =
-            unsafe { sys::ane_model_input_spec_for_procedure(self.inner.raw, proc_idx, idx) };
+        let p = unsafe { sys::ane_model_input_spec_for_procedure(self.inner.raw, proc_idx, idx) };
         tensor_spec_from_raw(p)
     }
 
     /// Schema of output `idx` of procedure `proc_idx`.
+    #[must_use]
     pub fn output_for_procedure(&self, proc_idx: i32, idx: i32) -> Option<TensorSpec> {
         // SAFETY: see `output`.
-        let p =
-            unsafe { sys::ane_model_output_spec_for_procedure(self.inner.raw, proc_idx, idx) };
+        let p = unsafe { sys::ane_model_output_spec_for_procedure(self.inner.raw, proc_idx, idx) };
         tensor_spec_from_raw(p)
     }
 
     /// Byte size of input `idx` of procedure `proc_idx`.
+    #[must_use]
     pub fn input_nbytes_for_procedure(&self, proc_idx: i32, idx: i32) -> usize {
         // SAFETY: see `input_nbytes`.
         unsafe { sys::ane_model_input_nbytes_for_procedure(self.inner.raw, proc_idx, idx) }
     }
 
     /// Byte size of output `idx` of procedure `proc_idx`.
+    #[must_use]
     pub fn output_nbytes_for_procedure(&self, proc_idx: i32, idx: i32) -> usize {
         // SAFETY: see `output_nbytes`.
         unsafe { sys::ane_model_output_nbytes_for_procedure(self.inner.raw, proc_idx, idx) }
     }
 
     /// Static hardware queue depth advertised for this model (max in-flight).
+    #[must_use]
     pub fn queue_depth(&self) -> i32 {
         // SAFETY: read-only access.
         unsafe { sys::ane_model_queue_depth(self.inner.raw) }
     }
 
     /// Live count of evaluations currently in flight against this model.
+    #[must_use]
     pub fn in_flight(&self) -> i64 {
         // SAFETY: read-only access.
         unsafe { sys::ane_model_in_flight(self.inner.raw) }
     }
 
     /// `hexStringIdentifier` of the loaded program (empty if absent).
+    #[must_use]
     pub fn program_id(&self) -> String {
-        // SAFETY: returns a library-owned C string.
-        unsafe { sys_str_to_string(sys::ane_model_program_id(self.inner.raw)) }
+        // SAFETY: const accessor on a live model handle.
+        let raw = unsafe { sys::ane_model_program_id(self.inner.raw) };
+        // SAFETY: null or NUL-terminated C string owned by the library.
+        unsafe { sys_str_to_string(raw) }
     }
 
     /// `weightsHash` of the descriptor (empty if absent).
+    #[must_use]
     pub fn weights_hash(&self) -> String {
-        // SAFETY: returns a library-owned C string.
-        unsafe { sys_str_to_string(sys::ane_model_weights_hash(self.inner.raw)) }
+        // SAFETY: const accessor on a live model handle.
+        let raw = unsafe { sys::ane_model_weights_hash(self.inner.raw) };
+        // SAFETY: null or NUL-terminated C string owned by the library.
+        unsafe { sys_str_to_string(raw) }
     }
 
     /// Opaque driver `programHandle` exposed by `_ANEModel`. `None` if absent.
+    #[must_use]
     pub fn program_handle(&self) -> Option<u64> {
         let mut out: u64 = 0;
         // SAFETY: writes to a stack scalar.
-        if unsafe { sys::ane_model_program_handle(self.inner.raw, &raw mut out) } {
-            Some(out)
-        } else {
-            None
-        }
+        unsafe { sys::ane_model_program_handle(self.inner.raw, &raw mut out) }.then_some(out)
     }
 
     /// Opaque `intermediateBufferHandle`. `None` if absent.
+    #[must_use]
     pub fn intermediate_buffer_handle(&self) -> Option<u64> {
         let mut out: u64 = 0;
         // SAFETY: writes to a stack scalar.
-        if unsafe { sys::ane_model_intermediate_buffer_handle(self.inner.raw, &raw mut out) } {
-            Some(out)
-        } else {
-            None
-        }
+        unsafe { sys::ane_model_intermediate_buffer_handle(self.inner.raw, &raw mut out) }
+            .then_some(out)
     }
 
     /// Set the per-model bitmask telling the driver which hardware counters to populate.
+    ///
+    /// # Errors
+    /// Returns the framework error if `_ANEModel` rejects the new mask.
     pub fn set_perf_stats_mask(&self, mask: u32) -> Result<()> {
         // SAFETY: the C side reads `mask` and may mutate model-internal state.
         check(unsafe { sys::ane_model_set_perf_stats_mask(self.inner.raw, mask) })
     }
 
     /// Read back the current perf-stats mask.
+    #[must_use]
     pub fn perf_stats_mask(&self) -> u32 {
         // SAFETY: read-only access.
         unsafe { sys::ane_model_get_perf_stats_mask(self.inner.raw) }
     }
 }
 
+/// Copy a NUL-terminated C string into an owned [`String`]. Returns an
+/// empty string on null input. Lossy on non-UTF-8 bytes.
+///
+/// # Safety
+/// `p` must be either null or point at a NUL-terminated C string owned
+/// by the library and valid for the duration of this call.
 unsafe fn sys_str_to_string(p: *const c_char) -> String {
     if p.is_null() {
         return String::new();
@@ -1717,19 +1985,24 @@ unsafe fn sys_str_to_string(p: *const c_char) -> String {
 impl Buffer {
     /// Borrowed `IOSurfaceRef` backing this buffer, exposed as a raw pointer
     /// for Metal interop (cast to `IOSurfaceRef`). Do not release.
+    #[must_use]
     pub fn iosurface_ref(&self) -> *mut c_void {
         // SAFETY: read-only accessor.
         unsafe { sys::ane_buffer_iosurface_ref(self.raw) }
     }
 
     /// Wrap a caller-supplied `IOSurfaceRef` (as a raw pointer) in a fresh
-    /// [`Buffer`]. The surface is CFRetained; you may release your own
+    /// [`Buffer`]. The surface is `CFRetain`ed; you may release your own
     /// reference after this call returns `Ok`.
     ///
     /// # Safety
     /// `surface` must be a live `IOSurfaceRef`. `nbytes` should be the
     /// logical payload size; the framework validates it against the
     /// surface metadata.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::InvalidArg`] if `surface` is null or
+    /// `nbytes` exceeds the surface payload, or the framework error.
     pub unsafe fn adopt_iosurface(surface: *mut c_void, nbytes: usize) -> Result<Self> {
         let mut raw: *mut sys::AneBuffer = core::ptr::null_mut();
         // SAFETY: see method docs.
@@ -1741,7 +2014,7 @@ impl Buffer {
                 message: "ane_buffer_adopt_iosurface returned OK but null handle".into(),
             });
         }
-        Ok(Buffer { raw })
+        Ok(Self { raw })
     }
 }
 
@@ -1752,6 +2025,7 @@ impl Buffer {
 /// Hardware-counters sink. Attach to a [`Request`] before eval; read
 /// `hw_execution_ns()` after wait/run.
 pub struct PerfStats {
+    /// Owning FFI handle to the underlying `_ANEPerformanceStats`.
     raw: *mut sys::AnePerfStats,
 }
 
@@ -1761,6 +2035,9 @@ unsafe impl Send for PerfStats {}
 
 impl PerfStats {
     /// Allocate a fresh perf-stats sink.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::Oom`] if the framework allocation fails.
     pub fn new() -> Result<Self> {
         let mut raw: *mut sys::AnePerfStats = core::ptr::null_mut();
         // SAFETY: writes the new handle on success.
@@ -1777,12 +2054,14 @@ impl PerfStats {
 
     /// Hardware execution time of the most recent eval, in nanoseconds.
     /// Returns 0 before any eval has populated the sink.
+    #[must_use]
     pub fn hw_execution_ns(&self) -> u64 {
         // SAFETY: read-only access.
         unsafe { sys::ane_perf_stats_hw_execution_ns(self.raw) }
     }
 
     /// Copy the raw counter blob into a freshly-allocated `Vec<u8>`.
+    #[must_use]
     pub fn counters(&self) -> Vec<u8> {
         // SAFETY: read-only access.
         let n = unsafe { sys::ane_perf_stats_counters_nbytes(self.raw) };
@@ -1794,7 +2073,8 @@ impl PerfStats {
         buf
     }
 
-    pub(crate) fn raw(&self) -> *mut sys::AnePerfStats {
+    /// Raw FFI handle, for binding into the C API.
+    pub(crate) const fn raw(&self) -> *mut sys::AnePerfStats {
         self.raw
     }
 }
@@ -1815,6 +2095,7 @@ impl Drop for PerfStats {
 
 /// Container of signal + wait events for GPU↔ANE synchronization.
 pub struct SharedEvents {
+    /// Owning FFI handle to the underlying `_ANESharedEvents`.
     raw: *mut sys::AneSharedEvents,
 }
 
@@ -1824,6 +2105,9 @@ unsafe impl Send for SharedEvents {}
 
 impl SharedEvents {
     /// Allocate a fresh event container.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::Oom`] if the framework allocation fails.
     pub fn new() -> Result<Self> {
         let mut raw: *mut sys::AneSharedEvents = core::ptr::null_mut();
         // SAFETY: writes the new handle on success.
@@ -1843,6 +2127,10 @@ impl SharedEvents {
     ///
     /// # Safety
     /// `mtl_shared_event`, if non-null, must be a live Obj-C object pointer.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::InvalidArg`] if the C side rejects the
+    /// shared-event handle.
     pub unsafe fn add_signal(
         &mut self,
         value: u64,
@@ -1868,6 +2156,9 @@ impl SharedEvents {
     ///
     /// # Safety
     /// Same contract as [`SharedEvents::add_signal`] on `mtl_shared_event`.
+    ///
+    /// # Errors
+    /// Same conditions as [`SharedEvents::add_signal`].
     pub unsafe fn add_wait(
         &mut self,
         value: u64,
@@ -1881,18 +2172,21 @@ impl SharedEvents {
     }
 
     /// Number of signal events queued.
+    #[must_use]
     pub fn num_signals(&self) -> i32 {
         // SAFETY: read-only.
         unsafe { sys::ane_shared_events_num_signals(self.raw) }
     }
 
     /// Number of wait events queued.
+    #[must_use]
     pub fn num_waits(&self) -> i32 {
         // SAFETY: read-only.
         unsafe { sys::ane_shared_events_num_waits(self.raw) }
     }
 
-    pub(crate) fn raw(&self) -> *mut sys::AneSharedEvents {
+    /// Raw FFI handle, for binding into the C API.
+    pub(crate) const fn raw(&self) -> *mut sys::AneSharedEvents {
         self.raw
     }
 }
@@ -1914,6 +2208,9 @@ impl Drop for SharedEvents {
 impl Request {
     /// Per-request weight override. The buffer is retained by `self` and
     /// kept alive until cleared or the request drops.
+    ///
+    /// # Errors
+    /// Returns the framework error if the C side rejects the binding.
     pub fn set_weights(&mut self, weights: Option<Buffer>) -> Result<()> {
         let ptr = weights.as_ref().map_or(core::ptr::null_mut(), Buffer::raw);
         // SAFETY: `self.raw` is live; the C side just stores the pointer.
@@ -1924,12 +2221,17 @@ impl Request {
     }
 
     /// Select which procedure (entry point) this request targets.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::InvalidArg`] if `proc_idx` is outside
+    /// `[0, num_procedures)`.
     pub fn set_procedure_index(&mut self, proc_idx: i32) -> Result<()> {
         // SAFETY: integer setter on a live request.
         check(unsafe { sys::ane_request_set_procedure_index(self.raw, proc_idx) })
     }
 
     /// Currently-set procedure index. Defaults to 0.
+    #[must_use]
     pub fn procedure_index(&self) -> i32 {
         // SAFETY: read-only access.
         unsafe { sys::ane_request_procedure_index(self.raw) }
@@ -1937,6 +2239,9 @@ impl Request {
 
     /// Attach a [`PerfStats`] sink for the next eval. The sink is retained
     /// by `self` until cleared.
+    ///
+    /// # Errors
+    /// Returns the framework error if the C side rejects the binding.
     pub fn set_perf_stats(&mut self, ps: Option<PerfStats>) -> Result<()> {
         let ptr = ps.as_ref().map_or(core::ptr::null_mut(), PerfStats::raw);
         // SAFETY: pointer setter on a live request.
@@ -1947,11 +2252,15 @@ impl Request {
     }
 
     /// Borrow the currently-attached perf-stats sink, if any.
-    pub fn perf_stats(&self) -> Option<&PerfStats> {
+    #[must_use]
+    pub const fn perf_stats(&self) -> Option<&PerfStats> {
         self.perf_stats.as_ref()
     }
 
     /// Attach a [`SharedEvents`] container for GPU↔ANE synchronization.
+    ///
+    /// # Errors
+    /// Returns the framework error if the C side rejects the binding.
     pub fn set_shared_events(&mut self, ev: Option<SharedEvents>) -> Result<()> {
         let ptr = ev.as_ref().map_or(core::ptr::null_mut(), SharedEvents::raw);
         // SAFETY: pointer setter on a live request.
@@ -1962,12 +2271,16 @@ impl Request {
     }
 
     /// Set the transaction handle used to group this request with others.
+    ///
+    /// # Errors
+    /// Returns the framework error if `ane_request_set_transaction` fails.
     pub fn set_transaction(&mut self, handle: u64) -> Result<()> {
         // SAFETY: scalar setter on a live request.
         check(unsafe { sys::ane_request_set_transaction(self.raw, handle) })
     }
 
     /// Currently-set transaction handle.
+    #[must_use]
     pub fn transaction(&self) -> u64 {
         // SAFETY: read-only access.
         unsafe { sys::ane_request_transaction(self.raw) }
@@ -1984,13 +2297,25 @@ impl Request {
 /// and shared events already configured), call [`Chain::prepare`] once,
 /// then [`Chain::enqueue`] repeatedly.
 pub struct Chain {
+    /// Owning FFI handle to the underlying `_ANEChainingRequest` array.
     raw: *mut sys::AneChain,
-    _requests: Vec<Request>,
+    /// Retained `Request` stages — keep alive for the chain's lifetime so
+    /// the buffer/perf-stats borrows the C side stored stay valid.
+    stages: Vec<Request>,
 }
 
 // SAFETY: the wrapped `_ANEChainingRequest` array is Obj-C state with no
 // thread affinity; host-side use is single-owner.
 unsafe impl Send for Chain {}
+
+impl core::fmt::Debug for Chain {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Chain")
+            .field("raw", &self.raw)
+            .field("stages", &self.stages.len())
+            .finish()
+    }
+}
 
 /// Parameters wiring one stage into a [`Chain`].
 #[derive(Clone, Debug, Default)]
@@ -2007,6 +2332,10 @@ pub struct ChainLink {
 
 impl Chain {
     /// Build a chain from already-configured requests + their inter-stage links.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::InvalidArg`] if `stages` is empty, or
+    /// the framework error if `ane_chain_create` rejects the layout.
     pub fn new(stages: Vec<(Request, ChainLink)>) -> Result<Self> {
         if stages.is_empty() {
             return Err(Error {
@@ -2038,18 +2367,26 @@ impl Chain {
         check(status)?;
         Ok(Self {
             raw,
-            _requests: requests,
+            stages: requests,
         })
     }
 
     /// One-time preparation: maps intermediate buffers and resolves
     /// loopback symbols.
+    ///
+    /// # Errors
+    /// Returns the framework error if a stage's loopback symbols can't
+    /// be resolved or a memory pool can't be allocated.
     pub fn prepare(&mut self, qos: QoS) -> Result<()> {
         // SAFETY: live handle owned by `self`.
         check(unsafe { sys::ane_chain_prepare(self.raw, qos) })
     }
 
     /// Submit the chain. May be called repeatedly after a successful prepare.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::Busy`] if a prior enqueue is still in
+    /// flight, or the framework error from the dispatch call.
     pub fn enqueue(&mut self, qos: QoS) -> Result<()> {
         // SAFETY: live handle owned by `self`.
         check(unsafe { sys::ane_chain_enqueue(self.raw, qos) })
@@ -2057,6 +2394,10 @@ impl Chain {
 
     /// Block up to `timeout_ms` for the most recent enqueue to complete.
     /// Negative = forever, zero = poll.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::Timeout`] if the timeout elapses, or
+    /// the per-stage eval error on completion.
     pub fn wait(&mut self, timeout_ms: i32) -> Result<()> {
         // SAFETY: live handle owned by `self`.
         check(unsafe { sys::ane_chain_wait(self.raw, timeout_ms) })
@@ -2081,6 +2422,7 @@ impl Drop for Chain {
 // =============================================================
 
 /// Number of `aned` connections currently open in this process for loading models.
+#[must_use]
 pub fn num_client_connections() -> i32 {
     // SAFETY: parameter-less FFI call returning a scalar.
     unsafe { sys::ane_client_num_connections() }
@@ -2092,6 +2434,7 @@ pub fn num_client_connections() -> i32 {
 
 /// Load-tuning hint passed to `_ANEVirtualClient.sessionHintWithModel:`.
 pub struct SessionHint {
+    /// Owning FFI handle to the underlying `_ANESessionHint`.
     raw: *mut sys::AneSessionHint,
 }
 
@@ -2100,6 +2443,10 @@ unsafe impl Send for SessionHint {}
 
 impl SessionHint {
     /// Allocate a fresh session hint of the given kind.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::Unsupported`] for an unknown kind or
+    /// [`sys::AneStatus::Oom`] on allocation failure.
     pub fn new(kind: sys::AneSessionHintKind) -> Result<Self> {
         let mut raw: *mut sys::AneSessionHint = core::ptr::null_mut();
         // SAFETY: writes the new handle on success.
@@ -2126,14 +2473,18 @@ impl Drop for SessionHint {
 /// pointers to caller-owned Obj-C `NSDictionary*` objects for MPS
 /// constants and `modelAttributes` overrides.
 pub struct OpenFileOptionsEx {
+    /// File-based options the extended struct decorates.
     base: OpenFileOptions,
+    /// Caller-owned `NSDictionary*` of MPS constant overrides, or null.
     mps_constants_id: *mut c_void,
+    /// Caller-owned `NSDictionary*` of model attribute overrides, or null.
     model_attributes_id: *mut c_void,
 }
 
 impl OpenFileOptionsEx {
     /// Wrap a base set of file-open options.
-    pub fn new(base: OpenFileOptions) -> Self {
+    #[must_use]
+    pub const fn new(base: OpenFileOptions) -> Self {
         Self {
             base,
             mps_constants_id: core::ptr::null_mut(),
@@ -2147,7 +2498,7 @@ impl OpenFileOptionsEx {
     /// `id` must be a live Obj-C `NSDictionary*` (or null) for the
     /// duration of the open call.
     #[must_use]
-    pub unsafe fn mps_constants(mut self, id: *mut c_void) -> Self {
+    pub const unsafe fn mps_constants(mut self, id: *mut c_void) -> Self {
         self.mps_constants_id = id;
         self
     }
@@ -2157,7 +2508,7 @@ impl OpenFileOptionsEx {
     /// # Safety
     /// Same contract as [`Self::mps_constants`].
     #[must_use]
-    pub unsafe fn model_attributes(mut self, id: *mut c_void) -> Self {
+    pub const unsafe fn model_attributes(mut self, id: *mut c_void) -> Self {
         self.model_attributes_id = id;
         self
     }
@@ -2169,48 +2520,71 @@ impl OpenFileOptionsEx {
 
 impl Model {
     /// `_ANEModel.UUID` string. Empty when absent.
+    #[must_use]
     pub fn uuid(&self) -> String {
-        // SAFETY: library-owned string accessor.
-        unsafe { sys_str_to_string(sys::ane_model_uuid(self.inner.raw)) }
+        // SAFETY: const accessor on a live model handle.
+        let raw = unsafe { sys::ane_model_uuid(self.inner.raw) };
+        // SAFETY: null or NUL-terminated C string owned by the library.
+        unsafe { sys_str_to_string(raw) }
     }
     /// Absolute string of the original source URL, when known.
+    #[must_use]
     pub fn source_url(&self) -> String {
-        // SAFETY: library-owned string accessor.
-        unsafe { sys_str_to_string(sys::ane_model_source_url(self.inner.raw)) }
+        // SAFETY: const accessor on a live model handle.
+        let raw = unsafe { sys::ane_model_source_url(self.inner.raw) };
+        // SAFETY: null or NUL-terminated C string owned by the library.
+        unsafe { sys_str_to_string(raw) }
     }
     /// Absolute string of the compiled-bundle URL, when loaded from disk.
+    #[must_use]
     pub fn model_url(&self) -> String {
-        // SAFETY: library-owned string accessor.
-        unsafe { sys_str_to_string(sys::ane_model_model_url(self.inner.raw)) }
+        // SAFETY: const accessor on a live model handle.
+        let raw = unsafe { sys::ane_model_model_url(self.inner.raw) };
+        // SAFETY: null or NUL-terminated C string owned by the library.
+        unsafe { sys_str_to_string(raw) }
     }
     /// Cache key currently associated with the loaded model.
+    #[must_use]
     pub fn key(&self) -> String {
-        // SAFETY: library-owned string accessor.
-        unsafe { sys_str_to_string(sys::ane_model_key(self.inner.raw)) }
+        // SAFETY: const accessor on a live model handle.
+        let raw = unsafe { sys::ane_model_key(self.inner.raw) };
+        // SAFETY: null or NUL-terminated C string owned by the library.
+        unsafe { sys_str_to_string(raw) }
     }
     /// `cacheURLIdentifier` of the loaded model, when set.
+    #[must_use]
     pub fn cache_url_identifier(&self) -> String {
-        // SAFETY: library-owned string accessor.
-        unsafe { sys_str_to_string(sys::ane_model_cache_url_identifier(self.inner.raw)) }
+        // SAFETY: const accessor on a live model handle.
+        let raw = unsafe { sys::ane_model_cache_url_identifier(self.inner.raw) };
+        // SAFETY: null or NUL-terminated C string owned by the library.
+        unsafe { sys_str_to_string(raw) }
     }
     /// Raw `identifierSource` enum value reported by the framework.
+    #[must_use]
     pub fn identifier_source(&self) -> i64 {
         // SAFETY: scalar accessor.
         unsafe { sys::ane_model_identifier_source(self.inner.raw) }
     }
     /// True if the underlying `_ANEClient` is a virtual (per-process) client.
+    #[must_use]
     pub fn is_virtual_client(&self) -> bool {
         // SAFETY: scalar accessor.
         unsafe { sys::ane_model_is_virtual_client(self.inner.raw) }
     }
 
     /// Request that transient state be reset on the next unload.
+    ///
+    /// # Errors
+    /// Returns the framework error if `_ANEModel` rejects the request.
     pub fn reset_on_unload(&self) -> Result<()> {
         // SAFETY: takes a live model handle; framework mutates internal state.
         check(unsafe { sys::ane_model_reset_on_unload(self.inner.raw) })
     }
 
     /// Explicitly unload the model (without freeing the handle).
+    ///
+    /// # Errors
+    /// Returns the framework error if `_ANEModel` rejects the unload.
     pub fn unload(&self) -> Result<()> {
         // SAFETY: takes a live model handle.
         check(unsafe { sys::ane_model_unload(self.inner.raw) })
@@ -2218,10 +2592,15 @@ impl Model {
 
     /// Load a fresh runtime instance sharing the same compiled program.
     /// Useful for the train-from-checkpoint pattern.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::InvalidArg`] if `key` contains a NUL
+    /// byte, or the framework error if a fresh instance can't be
+    /// instantiated from the compiled program.
     pub fn new_instance(&self, key: Option<&str>, qos: QoS) -> Result<Self> {
         let key_c = key
             .map(|k| {
-                CString::new(k).map_err(|_| Error {
+                CString::new(k).map_err(|_nul| Error {
                     status: sys::AneStatus::InvalidArg,
                     message: "key contains NUL".into(),
                 })
@@ -2250,6 +2629,10 @@ impl Model {
 
     /// Apply a session hint to this model. Returns the framework's
     /// per-hint report as a UTF-8 JSON string (empty if none).
+    ///
+    /// # Errors
+    /// Returns the framework error if the hint is incompatible with the
+    /// loaded model or `_ANEModel` rejects the request.
     pub fn apply_session_hint(&self, hint: &SessionHint) -> Result<String> {
         let mut report_ptr: *mut c_char = core::ptr::null_mut();
         // SAFETY: writes a freshly-malloc'd C string into `report_ptr` on success.
@@ -2275,6 +2658,10 @@ impl Model {
     }
 
     /// Open via the extended file path with MPS constants / attribute overrides.
+    ///
+    /// # Errors
+    /// Same conditions as [`Self::open_file`] plus framework rejection of
+    /// the supplied MPS constants or model-attribute overrides.
     pub fn open_file_ex(opts: &OpenFileOptionsEx) -> Result<Self> {
         let base = sys::AneModelFileOpenOptions {
             model_url: opts.base.model_url.as_ptr(),
@@ -2317,14 +2704,20 @@ impl Model {
 // =============================================================
 
 /// Human-readable name of perf counter `counter_idx`.
+#[must_use]
 pub fn perf_counter_name(counter_idx: i32) -> String {
-    // SAFETY: library-owned thread-local buffer.
-    unsafe { sys_str_to_string(sys::ane_perf_counter_name(counter_idx)) }
+    // SAFETY: parameter-less FFI call.
+    let raw = unsafe { sys::ane_perf_counter_name(counter_idx) };
+    // SAFETY: null or NUL-terminated thread-local C string.
+    unsafe { sys_str_to_string(raw) }
 }
 
 impl PerfStats {
     /// Emit `os_signpost` events keyed by `model_string_id` for the
     /// counters captured by this sink.
+    ///
+    /// # Errors
+    /// Returns the framework error if `os_signpost` emission fails.
     pub fn emit_signpost(&self, model_string_id: u64) -> Result<()> {
         // SAFETY: read-only access to a live handle.
         check(unsafe { sys::ane_perf_stats_emit_signpost(self.raw, model_string_id) })
@@ -2335,6 +2728,7 @@ impl Request {
     /// Number of per-stage perf-stats slots on this request.
     /// For a single-stage request this is 0 or 1; for a chained request
     /// it equals the number of stages.
+    #[must_use]
     pub fn num_perf_stats(&self) -> i32 {
         // SAFETY: read-only access.
         unsafe { sys::ane_request_num_perf_stats(self.raw) }
@@ -2347,6 +2741,11 @@ impl Request {
 
 /// Route a compressed weight blob through the framework's parallel
 /// decompressor and return the decompressed bytes.
+///
+/// # Errors
+/// Returns [`sys::AneStatus::InvalidArg`] if `compressed` does not match
+/// the framework's expected weight-compression container, or the
+/// framework error if decompression fails.
 pub fn decompress_weights(compressed: &[u8]) -> Result<Vec<u8>> {
     let mut out_ptr: *mut c_void = core::ptr::null_mut();
     let mut out_n: usize = 0;

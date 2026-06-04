@@ -23,7 +23,11 @@ extern Class g_AneSharedEventsCls;     /* _ANESharedEvents */
 extern Class g_AneSharedSignalEventCls;/* _ANESharedSignalEvent */
 extern Class g_AneSharedWaitEventCls;  /* _ANESharedWaitEvent */
 extern Class g_AneChainingRequestCls;  /* _ANEChainingRequest */
-extern Class g_AneProgramForEvalCls;   /* _ANEProgramForEvaluation */
+extern Class g_AneDeviceInfoCls;       /* _ANEDeviceInfo */
+
+/* Associated-object key used to store per-instance symbol indices
+ * we publish via the `-symbolIndex` stub installed at load time. */
+extern char g_ane_symbol_index_key;
 
 /* Selectors used (documentation only — invoked via objc_msgSend casts). */
 /*  +[_ANEInMemoryModelDescriptor modelWithMILText:weights:optionsPlist:]
@@ -42,8 +46,5 @@ extern Class g_AneProgramForEvalCls;   /* _ANEProgramForEvaluation */
 /* Idempotent loader. Returns YES on success, NO if the framework or
  * any of the required classes cannot be found. */
 BOOL ane_private_load(void);
-
-/* Install the getUUID stub on _ANEInMemoryModel. Idempotent. */
-void ane_private_install_uuid_stub(void);
 
 #endif /* ANE_PRIVATE_H */

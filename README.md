@@ -51,12 +51,12 @@ uv run python tools/make_bench_model.py build/bench
 bash scripts/bench_vs_coreml.sh build/bench/bench.mlmodelc
 ```
 
-| Path              | min   | p50   | p90   | p99   | max   | mean  | std  |
-| ----------------- | ----- | ----- | ----- | ----- | ----- | ----- | ---- |
-| ane-bridge        | 238   | 265   | 303   | 329   | 417   | 271   | 21   |
-| CoreML (.ane)     | 262   | 293   | 311   | 333   | 512   | 293   | 16   |
-| CoreML (.all)     | 263   | 297   | 315   | 339   | 436   | 297   | 15   |
-| CoreML (.cpu)     | 1178  | 1191  | 1223  | 1265  | 1345  | 1198  | 19   |
+| Path          | min  | p50  | p90  | p99  | max  | mean | std |
+| ------------- | ---- | ---- | ---- | ---- | ---- | ---- | --- |
+| ane-bridge    | 238  | 265  | 303  | 329  | 417  | 271  | 21  |
+| CoreML (.ane) | 262  | 293  | 311  | 333  | 512  | 293  | 16  |
+| CoreML (.all) | 263  | 297  | 315  | 339  | 436  | 297  | 15  |
+| CoreML (.cpu) | 1178 | 1191 | 1223 | 1265 | 1345 | 1198 | 19  |
 
 All values in microseconds. The CPU row rules out either ANE path
 silently falling back.
@@ -169,43 +169,43 @@ sources via the `cc` crate.
 
 ## API surface
 
-| C call                                  | Rust                                                            |
-| --------------------------------------- | --------------------------------------------------------------- |
-| `ane_model_open`                        | `Model::open`                                                   |
-| `ane_model_close`                       | `Drop` on `Model` (`Arc`)                                       |
-| `ane_model_{input,output}_spec/_nbytes` | `Model::input(idx)`, `Model::output(idx)` → `TensorSpec`        |
-| `ane_buffer_create*`                    | `Model::buffer`, `Model::input_buffer`, `Model::output_buffer`  |
-| `ane_buffer_lock`/`unlock`              | `Buffer::lock` (RAII guard) or `Buffer::with_locked` (closure)  |
-| `ane_request_create`                    | `Model::request`                                                |
-| `ane_request_bind_input/output`         | `Request::bind_input/output` (take `Buffer` by value)           |
-| —                                       | `Request::input_buffer_mut` / `output_buffer_mut`               |
-| `ane_request_set/get_*_bytes`           | `Request::set_input_bytes`, `get_output_bytes`                  |
-| `ane_request_submit` / `wait` / `run`   | `Request::submit` / `wait` / `run`                              |
-| `ane_request_submit` + async glue       | `Request::submit_async` → `impl Future<Output=Result<()>>`      |
-| `ane_request_set_completion`            | `Request::on_complete(FnMut+Send+'static)` / `clear_completion` |
-| `ane_request_last_error`                | `Request::last_error`                                           |
-| `ane_model_open_ex`                     | `Model::open_ex(&OpenOptionsEx)`                                |
-| `ane_model_open_file{,_ex}`             | `Model::open_file{,_ex}`                                        |
-| `ane_model_open_realtime{,_ex}`         | `Model::open_realtime{,_ex}`                                    |
-| `ane_realtime_task_{begin,end}`         | `realtime_task_{begin,end}()`                                   |
-| `ane_model_num_procedures`              | `Model::num_procedures`                                         |
-| `ane_model_*_for_procedure`             | `Model::*_for_procedure`                                        |
-| `ane_request_set_procedure_index`       | `Request::set_procedure_index`                                  |
-| `ane_request_set_weights`               | `Request::set_weights`                                          |
-| `ane_perf_stats_*` + `*_perf_stats_mask`| `PerfStats`, `Model::set_perf_stats_mask`                       |
-| `ane_request_set_perf_stats`            | `Request::set_perf_stats`                                       |
-| `ane_shared_events_*`                   | `SharedEvents`                                                  |
-| `ane_request_set_shared_events`         | `Request::set_shared_events`                                    |
-| `ane_buffer_iosurface_ref`              | `Buffer::iosurface_ref`                                         |
-| `ane_buffer_adopt_iosurface`            | `Buffer::adopt_iosurface` (unsafe)                              |
-| `ane_chain_{create,prepare,enqueue}`    | `Chain::{new,prepare,enqueue}`                                  |
-| `ane_model_queue_depth` / `in_flight`   | `Model::queue_depth` / `in_flight`                              |
-| `ane_model_program_id` / `weights_hash` | `Model::program_id` / `weights_hash`                            |
-| `ane_cache_{exists,purge}_for_hash`     | `cache_{exists,purge}_for_hash`                                 |
-| `ane_device_info`                       | `device_info()`                                                 |
-| `ane_session_hint_*`                    | `SessionHint`, `Model::apply_session_hint`                      |
-| `ane_model_new_instance`                | `Model::new_instance`                                           |
-| `ane_decompress_weights`                | `decompress_weights`                                            |
+| C call                                   | Rust                                                            |
+| ---------------------------------------- | --------------------------------------------------------------- |
+| `ane_model_open`                         | `Model::open`                                                   |
+| `ane_model_close`                        | `Drop` on `Model` (`Arc`)                                       |
+| `ane_model_{input,output}_spec/_nbytes`  | `Model::input(idx)`, `Model::output(idx)` → `TensorSpec`        |
+| `ane_buffer_create*`                     | `Model::buffer`, `Model::input_buffer`, `Model::output_buffer`  |
+| `ane_buffer_lock`/`unlock`               | `Buffer::lock` (RAII guard) or `Buffer::with_locked` (closure)  |
+| `ane_request_create`                     | `Model::request`                                                |
+| `ane_request_bind_input/output`          | `Request::bind_input/output` (take `Buffer` by value)           |
+| —                                        | `Request::input_buffer_mut` / `output_buffer_mut`               |
+| `ane_request_set/get_*_bytes`            | `Request::set_input_bytes`, `get_output_bytes`                  |
+| `ane_request_submit` / `wait` / `run`    | `Request::submit` / `wait` / `run`                              |
+| `ane_request_submit` + async glue        | `Request::submit_async` → `impl Future<Output=Result<()>>`      |
+| `ane_request_set_completion`             | `Request::on_complete(FnMut+Send+'static)` / `clear_completion` |
+| `ane_request_last_error`                 | `Request::last_error`                                           |
+| `ane_model_open_ex`                      | `Model::open_ex(&OpenOptionsEx)`                                |
+| `ane_model_open_file{,_ex}`              | `Model::open_file{,_ex}`                                        |
+| `ane_model_open_realtime{,_ex}`          | `Model::open_realtime{,_ex}`                                    |
+| `ane_realtime_task_{begin,end}`          | `realtime_task_{begin,end}()`                                   |
+| `ane_model_num_procedures`               | `Model::num_procedures`                                         |
+| `ane_model_*_for_procedure`              | `Model::*_for_procedure`                                        |
+| `ane_request_set_procedure_index`        | `Request::set_procedure_index`                                  |
+| `ane_request_set_weights`                | `Request::set_weights`                                          |
+| `ane_perf_stats_*` + `*_perf_stats_mask` | `PerfStats`, `Model::set_perf_stats_mask`                       |
+| `ane_request_set_perf_stats`             | `Request::set_perf_stats`                                       |
+| `ane_shared_events_*`                    | `SharedEvents`                                                  |
+| `ane_request_set_shared_events`          | `Request::set_shared_events`                                    |
+| `ane_buffer_iosurface_ref`               | `Buffer::iosurface_ref`                                         |
+| `ane_buffer_adopt_iosurface`             | `Buffer::adopt_iosurface` (unsafe)                              |
+| `ane_chain_{create,prepare,enqueue}`     | `Chain::{new,prepare,enqueue}`                                  |
+| `ane_model_queue_depth` / `in_flight`    | `Model::queue_depth` / `in_flight`                              |
+| `ane_model_program_id` / `weights_hash`  | `Model::program_id` / `weights_hash`                            |
+| `ane_cache_{exists,purge}_for_hash`      | `cache_{exists,purge}_for_hash`                                 |
+| `ane_device_info`                        | `device_info()`                                                 |
+| `ane_session_hint_*`                     | `SessionHint`, `Model::apply_session_hint`                      |
+| `ane_model_new_instance`                 | `Model::new_instance`                                           |
+| `ane_decompress_weights`                 | `decompress_weights`                                            |
 
 ## Threading model
 
@@ -222,9 +222,10 @@ sources via the `cc` crate.
 
 ## Further reading
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — dispatch path diagrams, model/buffer/request lifecycle, error reporting, Rust safety invariants.
-- [TESTING.md](TESTING.md) — test suites, CI checks, system corpus.
-- [CONTRIBUTING.md](CONTRIBUTING.md) — development setup, lint policy.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — dispatch path diagrams, model/buffer/request lifecycle, error reporting, Rust safety invariants.
+- [docs/TESTING.md](docs/TESTING.md) — test suites, CI checks, system corpus.
+- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — development setup, lint policy.
+- [docs/DEBUNK.md](docs/DEBUNK.md) — why ANE ≠ SME, with measured evidence.
 
 ## License
 

@@ -4,7 +4,49 @@
 //! takes ~200-500 ms; tests are therefore slower than typical unit tests.
 //! Run with `cargo test --release` for the lowest overhead.
 
-#![allow(clippy::cast_precision_loss)]
+#![allow(
+    clippy::allow_attributes,
+    clippy::allow_attributes_without_reason,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::as_conversions,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::dbg_macro,
+    clippy::missing_panics_doc,
+    clippy::missing_errors_doc,
+    clippy::missing_assert_message,
+    clippy::missing_docs_in_private_items,
+    clippy::tests_outside_test_module,
+    clippy::std_instead_of_core,
+    clippy::std_instead_of_alloc,
+    clippy::separated_literal_suffix,
+    clippy::unseparated_literal_suffix,
+    clippy::unreadable_literal,
+    clippy::shadow_unrelated,
+    clippy::shadow_reuse,
+    clippy::shadow_same,
+    clippy::min_ident_chars,
+    clippy::float_arithmetic,
+    clippy::float_cmp,
+    clippy::arithmetic_side_effects,
+    clippy::integer_division,
+    clippy::default_numeric_fallback,
+    clippy::pattern_type_mismatch,
+    clippy::if_then_some_else_none,
+    clippy::single_call_fn,
+    clippy::needless_pass_by_value,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::redundant_pub_crate,
+    clippy::semicolon_outside_block,
+    clippy::semicolon_inside_block,
+    clippy::semicolon_if_nothing_returned,
+    clippy::cast_precision_loss,
+    reason = "integration tests use idiomatic `.unwrap()` / indexing / `as` / \
+              `println!` — assertion failure IS the test failure mode"
+)]
 
 mod common;
 
@@ -291,6 +333,44 @@ fn wait_with_zero_timeout_polls() {
     req.run(QoS::Default).unwrap();
     // After run completes, polling should return Ok immediately.
     req.wait(0).unwrap();
+}
+
+#[test]
+fn resubmit_without_intervening_wait_stays_balanced() {
+    // Regression: submitting again after a completion but *before* calling
+    // wait() used to leave a stale `done_sem` count. The next timed wait()
+    // then consumed that stale signal and returned *before* the new eval
+    // finished — so `is_done()` could still be false right after `wait`
+    // returned Ok. `ane_request_submit`/`run` now drain the semaphore on
+    // entry, keeping signal/consume balanced 1:1 per submission. Repeated
+    // to shake out the timing window.
+    let m = open_identity();
+    let mut req = m.request().unwrap();
+    let input = ramp(0.01);
+    let mut out = vec![0_f32; N_ELEM];
+    for k in 0..128 {
+        req.set_input_bytes(0, as_bytes(&input)).unwrap();
+        req.submit(QoS::Default).unwrap();
+        // Spin until the worker has completed AND signaled the semaphore,
+        // so the next submit exercises the stale-signal window.
+        while !req.is_done() {
+            std::hint::spin_loop();
+        }
+        // Re-arm and submit again with no intervening wait().
+        req.set_input_bytes(0, as_bytes(&input)).unwrap();
+        req.submit(QoS::Default).unwrap();
+        req.wait(-1).unwrap();
+        assert!(
+            req.is_done(),
+            "wait() returned before the resubmitted eval completed (iter {k})"
+        );
+        req.get_output_bytes(0, as_bytes_mut(&mut out)).unwrap();
+        assert!(
+            (out[0] - input[0]).abs() < 1e-2 && (out[15] - input[15]).abs() < 1e-2,
+            "stale/premature output at iter {k}: {:?}",
+            &out[..4]
+        );
+    }
 }
 
 // ---- Completion callback ----

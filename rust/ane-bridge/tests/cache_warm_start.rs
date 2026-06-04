@@ -2,7 +2,49 @@
 //! aned's lowered-program cache on the second call, skipping the
 //! `compileWithQoS:` step.
 
-#![allow(clippy::cast_precision_loss)]
+#![allow(
+    clippy::allow_attributes,
+    clippy::allow_attributes_without_reason,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::as_conversions,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::dbg_macro,
+    clippy::missing_panics_doc,
+    clippy::missing_errors_doc,
+    clippy::missing_assert_message,
+    clippy::missing_docs_in_private_items,
+    clippy::tests_outside_test_module,
+    clippy::std_instead_of_core,
+    clippy::std_instead_of_alloc,
+    clippy::separated_literal_suffix,
+    clippy::unseparated_literal_suffix,
+    clippy::unreadable_literal,
+    clippy::shadow_unrelated,
+    clippy::shadow_reuse,
+    clippy::shadow_same,
+    clippy::min_ident_chars,
+    clippy::float_arithmetic,
+    clippy::float_cmp,
+    clippy::arithmetic_side_effects,
+    clippy::integer_division,
+    clippy::default_numeric_fallback,
+    clippy::pattern_type_mismatch,
+    clippy::if_then_some_else_none,
+    clippy::single_call_fn,
+    clippy::needless_pass_by_value,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::redundant_pub_crate,
+    clippy::semicolon_outside_block,
+    clippy::semicolon_inside_block,
+    clippy::semicolon_if_nothing_returned,
+    clippy::cast_precision_loss,
+    reason = "integration tests use idiomatic `.unwrap()` / indexing / `as` / \
+              `println!` — assertion failure IS the test failure mode"
+)]
 
 mod common;
 
@@ -122,7 +164,10 @@ fn cache_flag_is_per_model_not_global() {
     // Open A cold then warm so the cache is definitely populated.
     let _ma_cold = Model::open(&opts_a).expect("A cold");
     let ma_warm = Model::open(&opts_a).expect("A warm");
-    assert!(ma_warm.was_cached(), "model A should be cached by second open");
+    assert!(
+        ma_warm.was_cached(),
+        "model A should be cached by second open"
+    );
 
     // Now open a brand-new model B. The fixture builder embeds a
     // unique nanosecond + counter token in the MIL's `buildInfo`, so

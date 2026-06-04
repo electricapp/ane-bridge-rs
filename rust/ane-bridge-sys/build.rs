@@ -1,17 +1,21 @@
 //! build.rs — compile the C/Obj-C sources into a static archive that we link
 //! into this crate. We don't depend on a prebuilt dylib so `cargo build`
 //! works standalone.
-#![allow(missing_docs)]
+#![allow(missing_docs, reason = "build scripts don't need item docs")]
 
-use std::path::PathBuf;
+use std::env;
+use std::io::Result as IoResult;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
-fn main() {
+fn main() -> IoResult<()> {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // Project layout: rust/ane-bridge-sys/ → ../../c/{include,src}
-    let root = crate_dir
-        .parent() // rust/
-        .and_then(|p| p.parent()) // ane-bridge/
-        .expect("expected crate to live under <root>/rust/ane-bridge-sys");
+    let Some(root) = crate_dir.parent().and_then(Path::parent) else {
+        return Err(std::io::Error::other(
+            "expected crate to live under <root>/rust/ane-bridge-sys",
+        ));
+    };
     let inc_dir = root.join("c/include");
     let src_dir = root.join("c/src");
 
@@ -33,7 +37,7 @@ fn main() {
     // cargo build`. The maintainer script at `scripts/coverage.sh`
     // bundles this with `LLVM_PROFILE_FILE` + `llvm-profdata merge` +
     // `llvm-cov show` to produce a parser coverage report.
-    if std::env::var("ANE_BRIDGE_COVERAGE").is_ok_and(|v| v == "1") {
+    if env::var("ANE_BRIDGE_COVERAGE").is_ok_and(|v| v == "1") {
         build
             .flag("-fprofile-instr-generate")
             .flag("-fcoverage-mapping")
@@ -42,20 +46,7 @@ fn main() {
         // know to pull in `libclang_rt.profile_osx.a` — clang's normal
         // driver does that for us, but we're going through rustc. Link
         // it explicitly so the test binaries emit .profraw on exit.
-        let runtime_dir = std::process::Command::new("clang")
-            .args(["--print-runtime-dir"])
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| {
-                "/Library/Developer/CommandLineTools/usr/lib/clang/21/lib/darwin".to_string()
-            });
+        let runtime_dir = clang_runtime_dir();
         println!("cargo:rustc-link-search=native={runtime_dir}");
         println!("cargo:rustc-link-lib=static=clang_rt.profile_osx");
         // Force the linker to pull `__llvm_profile_runtime` from the
@@ -72,25 +63,12 @@ fn main() {
     // before `cargo clean -p ane-bridge-sys && cargo build`. We link the
     // dynamic TSAN runtime explicitly because rustc passes `-nodefaultlibs`
     // and drops the runtime clang would normally add via `-fsanitize=thread`.
-    if std::env::var("ANE_BRIDGE_TSAN").is_ok_and(|v| v == "1") {
+    if env::var("ANE_BRIDGE_TSAN").is_ok_and(|v| v == "1") {
         build.flag("-fsanitize=thread").flag("-g");
         // Locate `libclang_rt.tsan_osx_dynamic.dylib`. We ask the
         // toolchain via `clang --print-runtime-dir`; if that fails we
         // fall back to the well-known CLT path.
-        let runtime_dir = std::process::Command::new("clang")
-            .args(["--print-runtime-dir"])
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| {
-                "/Library/Developer/CommandLineTools/usr/lib/clang/21/lib/darwin".to_string()
-            });
+        let runtime_dir = clang_runtime_dir();
         println!("cargo:rustc-link-search=native={runtime_dir}");
         println!("cargo:rustc-link-lib=dylib=clang_rt.tsan_osx_dynamic");
         // The runtime is shipped as `libclang_rt.tsan_osx_dynamic.dylib`
@@ -127,4 +105,19 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=IOSurface");
     println!("cargo:rustc-link-lib=dylib=objc");
     println!("cargo:rustc-link-lib=dylib=dl");
+    Ok(())
+}
+
+/// Ask clang where its runtime lives; fall back to the well-known CLT
+/// path when the toolchain query fails (e.g. unsigned binaries on
+/// stripped CI runners).
+fn clang_runtime_dir() -> String {
+    let Ok(output) = Command::new("clang").args(["--print-runtime-dir"]).output() else {
+        return String::from("/Library/Developer/CommandLineTools/usr/lib/clang/21/lib/darwin");
+    };
+    if !output.status.success() {
+        return String::from("/Library/Developer/CommandLineTools/usr/lib/clang/21/lib/darwin");
+    }
+    let trimmed = String::from_utf8_lossy(&output.stdout);
+    String::from(trimmed.trim())
 }

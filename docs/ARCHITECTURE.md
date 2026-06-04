@@ -73,15 +73,15 @@ How ane-bridge gets from "MIL text + weights" to "tensor out of the ANE."
 └───────────────────────────────────────────────────────────────┘
 ```
 
-| Layer                         | Role                                           | Per-call cost                       |
-| ----------------------------- | ---------------------------------------------- | ----------------------------------- |
-| Rust caller                   | Typed handle, RAII, async API                  | —                                   |
-| `extern "C"`                  | Stable C ABI; pointer/int args                 | function call (LTO usually inlines) |
-| Obj-C glue (`ane_bridge.m`)   | IOSurface lifetimes, dispatch_queue, `_ANERequest` build | µs (NSArray build only)  |
-| `objc_msgSend` casts          | Selector invocation on private classes         | virtual call                        |
-| `AppleNeuralEngine.framework` | Private dispatcher; bridges to the ANE driver  | µs to enter                         |
-| `_ANECompiler`                | MIL → ANE bytecode; cached by `hexStringIdentifier` | 200-500 ms at open; 0 per call |
-| ANE bytecode → silicon        | Actual execution on matmul/conv/eltwise units  | runtime cost                        |
+| Layer                         | Role                                                     | Per-call cost                       |
+| ----------------------------- | -------------------------------------------------------- | ----------------------------------- |
+| Rust caller                   | Typed handle, RAII, async API                            | —                                   |
+| `extern "C"`                  | Stable C ABI; pointer/int args                           | function call (LTO usually inlines) |
+| Obj-C glue (`ane_bridge.m`)   | IOSurface lifetimes, dispatch_queue, `_ANERequest` build | µs (NSArray build only)             |
+| `objc_msgSend` casts          | Selector invocation on private classes                   | virtual call                        |
+| `AppleNeuralEngine.framework` | Private dispatcher; bridges to the ANE driver            | µs to enter                         |
+| `_ANECompiler`                | MIL → ANE bytecode; cached by `hexStringIdentifier`      | 200-500 ms at open; 0 per call      |
+| ANE bytecode → silicon        | Actual execution on matmul/conv/eltwise units            | runtime cost                        |
 
 ## Dispatch path: CoreML MLModel (for comparison)
 
@@ -131,17 +131,17 @@ How ane-bridge gets from "MIL text + weights" to "tensor out of the ANE."
 
 ### Key differences
 
-|                                | ane-bridge                                   | CoreML MLModel (Python)                                     |
-| ------------------------------ | -------------------------------------------- | ----------------------------------------------------------- |
-| Layers above ANE.framework     | 4 (Rust → C → ObjC → msgSend)                | 6 (Python → coremltools → pyobjc → MLModel → asset → disp) |
-| Cold start                     | ~200-500 ms (compile only)                   | 1-10 s first load, then cached                              |
-| Per-call overhead (small)      | IOSurface bind (~µs)                         | numpy/MLMultiArray marshalling (~10s of µs)                 |
-| Per-call overhead (large)      | same — IOSurface is zero-copy                | proportional to bytes — full memcpy each direction          |
-| Op routing                     | all-or-nothing ANE; hard fail on rejection   | automatic per-op fallback to GPU/CPU                        |
-| Model format                   | MIL text + single weights blob               | `.mlpackage` (signed bundle, metadata, multifile)           |
-| State management               | manual (caller owns buffers between calls)   | `MLState` on iOS 18+ / macOS 15+                            |
-| Op-fusion / layout control     | whatever the MIL program specifies           | whatever `coremlc` chose                                    |
-| App Store                      | no — links private symbols                   | yes                                                         |
+|                            | ane-bridge                                 | CoreML MLModel (Python)                                    |
+| -------------------------- | ------------------------------------------ | ---------------------------------------------------------- |
+| Layers above ANE.framework | 4 (Rust → C → ObjC → msgSend)              | 6 (Python → coremltools → pyobjc → MLModel → asset → disp) |
+| Cold start                 | ~200-500 ms (compile only)                 | 1-10 s first load, then cached                             |
+| Per-call overhead (small)  | IOSurface bind (~µs)                       | numpy/MLMultiArray marshalling (~10s of µs)                |
+| Per-call overhead (large)  | same — IOSurface is zero-copy              | proportional to bytes — full memcpy each direction         |
+| Op routing                 | all-or-nothing ANE; hard fail on rejection | automatic per-op fallback to GPU/CPU                       |
+| Model format               | MIL text + single weights blob             | `.mlpackage` (signed bundle, metadata, multifile)          |
+| State management           | manual (caller owns buffers between calls) | `MLState` on iOS 18+ / macOS 15+                           |
+| Op-fusion / layout control | whatever the MIL program specifies         | whatever `coremlc` chose                                   |
+| App Store                  | no — links private symbols                 | yes                                                        |
 
 ## Model lifecycle
 
