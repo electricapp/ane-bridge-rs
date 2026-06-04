@@ -1,11 +1,15 @@
 # ane-bridge
 
-[![CI](https://github.com/electricapp/ane-bridge-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/electricapp/ane-bridge-rs/actions/workflows/ci.yml)
+<div align="center">
+
+[![CI](https://github.com/electricapp/ane-bridge-rs/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/electricapp/ane-bridge-rs/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/ane-bridge.svg)](https://crates.io/crates/ane-bridge)
 [![docs.rs](https://docs.rs/ane-bridge/badge.svg)](https://docs.rs/ane-bridge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)](https://www.apple.com/macos/)
 [![Rust 1.95+](https://img.shields.io/badge/Rust-1.95%2B-orange?logo=rust)](https://www.rust-lang.org/)
+
+</div>
 
 Safe Rust bindings and C library for the Apple Neural Engine. A thin
 bridge from MIL text + weights to ANE, built on
@@ -15,8 +19,15 @@ when it offloads to ANE.
 - **Safe Rust bindings** + **C library** (`libane_bridge.dylib`) with a stable header (`ane_bridge.h`).
 - **Rust workspace**: `ane-bridge-sys` (raw FFI) + `ane-bridge` (safe wrapper).
 - **Schema derived from the framework** (via `modelAttributes`), not declared by the caller.
-- **Async**: `submit` + `wait` / poll / callback / `Future`; multiple in-flight requests per model.
+- **Async**: `submit` + `wait` / poll / callback / `Future`; up to 127 in-flight requests per model.
 - **Zero-copy path**: `IOSurface` bind with ownership transfer for hot loops; byte-ptr memcpy path for convenience.
+- **GPU↔ANE composition**: borrow the underlying `IOSurfaceRef`; queue Metal `MTLSharedEvent` signals/waits via `_ANESharedEvents`.
+- **Telemetry**: hardware execution time + raw perf counters from `_ANEPerformanceStats`; live in-flight count from `_ANEProgramForEvaluation`.
+- **Multi-procedure models**: per-procedure I/O schemas and per-request procedure index.
+- **Multi-blob weights**: `NSDictionary` of named weight entries (file or in-memory).
+- **Chained dispatch**: `_ANEChainingRequest` pipeline — prepare once, enqueue many times.
+- **File-based open**: `_ANEModel modelAtURL:key:` family with explicit cache key, `mpsConstants`, and `identifierSource`.
+- **Real-time class**: `loadRealTimeModel:` + `beginRealTimeTask` for latency-critical paths.
 - **Warm-start cache**: `Model::open` skips recompilation when `aned` already has a lowering for the model hash. Observable via `Model::was_cached()`.
 
 ## Testing
@@ -173,6 +184,28 @@ sources via the `cc` crate.
 | `ane_request_submit` + async glue       | `Request::submit_async` → `impl Future<Output=Result<()>>`      |
 | `ane_request_set_completion`            | `Request::on_complete(FnMut+Send+'static)` / `clear_completion` |
 | `ane_request_last_error`                | `Request::last_error`                                           |
+| `ane_model_open_ex`                     | `Model::open_ex(&OpenOptionsEx)`                                |
+| `ane_model_open_file{,_ex}`             | `Model::open_file{,_ex}`                                        |
+| `ane_model_open_realtime{,_ex}`         | `Model::open_realtime{,_ex}`                                    |
+| `ane_realtime_task_{begin,end}`         | `realtime_task_{begin,end}()`                                   |
+| `ane_model_num_procedures`              | `Model::num_procedures`                                         |
+| `ane_model_*_for_procedure`             | `Model::*_for_procedure`                                        |
+| `ane_request_set_procedure_index`       | `Request::set_procedure_index`                                  |
+| `ane_request_set_weights`               | `Request::set_weights`                                          |
+| `ane_perf_stats_*` + `*_perf_stats_mask`| `PerfStats`, `Model::set_perf_stats_mask`                       |
+| `ane_request_set_perf_stats`            | `Request::set_perf_stats`                                       |
+| `ane_shared_events_*`                   | `SharedEvents`                                                  |
+| `ane_request_set_shared_events`         | `Request::set_shared_events`                                    |
+| `ane_buffer_iosurface_ref`              | `Buffer::iosurface_ref`                                         |
+| `ane_buffer_adopt_iosurface`            | `Buffer::adopt_iosurface` (unsafe)                              |
+| `ane_chain_{create,prepare,enqueue}`    | `Chain::{new,prepare,enqueue}`                                  |
+| `ane_model_queue_depth` / `in_flight`   | `Model::queue_depth` / `in_flight`                              |
+| `ane_model_program_id` / `weights_hash` | `Model::program_id` / `weights_hash`                            |
+| `ane_cache_{exists,purge}_for_hash`     | `cache_{exists,purge}_for_hash`                                 |
+| `ane_device_info`                       | `device_info()`                                                 |
+| `ane_session_hint_*`                    | `SessionHint`, `Model::apply_session_hint`                      |
+| `ane_model_new_instance`                | `Model::new_instance`                                           |
+| `ane_decompress_weights`                | `decompress_weights`                                            |
 
 ## Threading model
 
@@ -185,7 +218,7 @@ sources via the `cc` crate.
 - Uses Apple's **private** `AppleNeuralEngine.framework`. Not App Store safe.
 - macOS only. Apple Silicon required.
 - MIL text is the input contract. No converter shipped — use `coremltools` or write MIL directly.
-- Weight references: `@model_path/weights/weight.bin` — one blob per model.
+- Weight references resolve against the `NSDictionary` passed at open — one entry per named blob.
 
 ## Further reading
 
