@@ -52,7 +52,7 @@
     clippy::ptr_as_ptr
 )]
 
-use core::ffi::{CStr, c_void};
+use core::ffi::{CStr, c_char, c_void};
 use core::ptr;
 use std::ffi::CString;
 use std::path::Path;
@@ -525,6 +525,9 @@ impl Model {
             callback: None,
             bound_inputs,
             bound_outputs,
+            weights_buf: None,
+            perf_stats: None,
+            shared_events: None,
         })
     }
 
@@ -756,6 +759,10 @@ pub struct Request {
     // append-replaced (each `bind_*(idx, buf)` overwrites slot `idx`).
     bound_inputs: Vec<Option<Buffer>>,
     bound_outputs: Vec<Option<Buffer>>,
+    // Optional per-request configuration retained for lifetime ownership.
+    weights_buf: Option<Buffer>,
+    perf_stats: Option<PerfStats>,
+    shared_events: Option<SharedEvents>,
 }
 
 // SAFETY:
@@ -1206,4 +1213,1166 @@ impl Drop for Request {
             drop(unsafe { Box::from_raw(prev) });
         }
     }
+}
+
+// =============================================================
+// Device info
+// =============================================================
+
+/// Hardware facts about the ANE on this machine, populated from
+/// `_ANEVirtualClient`. Returned by [`device_info`].
+#[derive(Clone, Debug)]
+pub struct DeviceInfo {
+    /// Number of ANE compute cores (e.g. 16 on M4 H16G).
+    pub num_cores: i32,
+    /// Number of ANE units (typically 1).
+    pub num_anes: i32,
+    /// True if the framework reports an ANE present.
+    pub has_ane: bool,
+    /// Opaque board identifier.
+    pub board_type: i64,
+    /// Architecture string (e.g. `"H16G"`).
+    pub arch_type: String,
+}
+
+/// Query the ANE device facts. Cheap; backed by `_ANEVirtualClient`.
+pub fn device_info() -> Result<DeviceInfo> {
+    let mut raw = sys::AneDeviceInfo {
+        num_cores: 0,
+        num_anes: 0,
+        has_ane: false,
+        board_type: 0,
+        arch_type: [0; 32],
+    };
+    // SAFETY: `&mut raw` points to a stack-allocated `#[repr(C)]` matching
+    // the C struct. The call writes fields and never reads from the buffer.
+    let status = unsafe { sys::ane_device_info(&raw mut raw) };
+    check(status)?;
+    let arch_type = {
+        let bytes: &[u8] = unsafe {
+            core::slice::from_raw_parts(raw.arch_type.as_ptr().cast::<u8>(), raw.arch_type.len())
+        };
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..end]).into_owned()
+    };
+    Ok(DeviceInfo {
+        num_cores: raw.num_cores,
+        num_anes: raw.num_anes,
+        has_ane: raw.has_ane,
+        board_type: raw.board_type,
+        arch_type,
+    })
+}
+
+// =============================================================
+// Cache management
+// =============================================================
+
+/// True if `aned` has a compiled artifact for the given hex hash.
+pub fn cache_exists_for_hash(hex_hash: &str) -> bool {
+    let Ok(c) = CString::new(hex_hash) else { return false };
+    // SAFETY: `c` lives until the call returns; the C side reads it once.
+    unsafe { sys::ane_cache_exists_for_hash(c.as_ptr()) }
+}
+
+/// Evict the compiled artifact for the given hex hash from `aned`.
+pub fn cache_purge_for_hash(hex_hash: &str) -> Result<()> {
+    let c = CString::new(hex_hash).map_err(|_| Error {
+        status: sys::AneStatus::InvalidArg,
+        message: "hex_hash contains NUL".into(),
+    })?;
+    // SAFETY: see `cache_exists_for_hash`.
+    let status = unsafe { sys::ane_cache_purge_for_hash(c.as_ptr()) };
+    check(status)
+}
+
+// =============================================================
+// Real-time scheduling class
+// =============================================================
+
+/// Enter the ANE real-time scheduling class for the current task.
+/// Pair with [`realtime_task_end`].
+pub fn realtime_task_begin() -> Result<()> {
+    // SAFETY: parameter-less FFI call.
+    check(unsafe { sys::ane_realtime_task_begin() })
+}
+
+/// Leave the real-time scheduling class.
+pub fn realtime_task_end() -> Result<()> {
+    // SAFETY: parameter-less FFI call.
+    check(unsafe { sys::ane_realtime_task_end() })
+}
+
+// =============================================================
+// Extended open options
+// =============================================================
+
+/// One named weight blob for the multi-blob [`OpenOptionsEx`] path.
+#[derive(Clone, Debug)]
+pub enum WeightSource {
+    /// Read the blob from a filesystem path.
+    Path(CString),
+    /// Use an owned in-memory blob.
+    Bytes(Vec<u8>),
+}
+
+/// Builder for a single named weight entry.
+#[derive(Clone, Debug)]
+pub struct WeightEntry {
+    name: CString,
+    source: WeightSource,
+}
+
+impl WeightEntry {
+    /// Build a weight entry that reads from `path`.
+    ///
+    /// # Panics
+    /// Panics if `name` or `path` contain a NUL byte.
+    pub fn from_path<S: Into<Vec<u8>>, P: AsRef<Path>>(name: S, path: P) -> Self {
+        Self {
+            name: CString::new(name.into()).expect("name contains NUL"),
+            source: WeightSource::Path(path_to_cstring(path.as_ref())),
+        }
+    }
+
+    /// Build a weight entry from an in-memory blob.
+    ///
+    /// # Panics
+    /// Panics if `name` contains a NUL byte.
+    pub fn from_bytes<S: Into<Vec<u8>>>(name: S, bytes: Vec<u8>) -> Self {
+        Self {
+            name: CString::new(name.into()).expect("name contains NUL"),
+            source: WeightSource::Bytes(bytes),
+        }
+    }
+}
+
+/// Extended open options: in-memory MIL bytes + multiple named weight blobs.
+#[derive(Clone, Debug)]
+pub struct OpenOptionsEx {
+    mil: WeightSource,
+    weights: Vec<WeightEntry>,
+    qos: QoS,
+    is_mil_model: bool,
+}
+
+impl OpenOptionsEx {
+    /// Build options with MIL read from `mil_path` and no weights.
+    pub fn from_path<P: AsRef<Path>>(mil_path: P) -> Self {
+        Self {
+            mil: WeightSource::Path(path_to_cstring(mil_path.as_ref())),
+            weights: Vec::new(),
+            qos: QoS::Default,
+            is_mil_model: true,
+        }
+    }
+
+    /// Build options with MIL supplied as an in-memory blob.
+    pub fn from_bytes(mil_bytes: Vec<u8>) -> Self {
+        Self {
+            mil: WeightSource::Bytes(mil_bytes),
+            weights: Vec::new(),
+            qos: QoS::Default,
+            is_mil_model: true,
+        }
+    }
+
+    /// Append a named weight blob.
+    #[must_use]
+    pub fn weight(mut self, entry: WeightEntry) -> Self {
+        self.weights.push(entry);
+        self
+    }
+
+    /// Replace the full weights list.
+    #[must_use]
+    pub fn weights(mut self, weights: Vec<WeightEntry>) -> Self {
+        self.weights = weights;
+        self
+    }
+
+    /// Override the compile + load `QoS`.
+    #[must_use]
+    pub fn qos(mut self, qos: QoS) -> Self {
+        self.qos = qos;
+        self
+    }
+
+    /// When false the MIL bytes are interpreted as a legacy
+    /// `NetworkDescription` rather than MIL.
+    #[must_use]
+    pub fn is_mil_model(mut self, yes: bool) -> Self {
+        self.is_mil_model = yes;
+        self
+    }
+
+    fn to_sys(&self) -> (sys::AneModelOpenOptionsEx, Vec<sys::AneWeightEntry>) {
+        let (mil_path, mil_bytes, mil_nbytes) = match &self.mil {
+            WeightSource::Path(p) => (p.as_ptr(), core::ptr::null::<c_void>(), 0usize),
+            WeightSource::Bytes(b) => (
+                core::ptr::null::<c_char>(),
+                b.as_ptr().cast::<c_void>(),
+                b.len(),
+            ),
+        };
+        let entries: Vec<sys::AneWeightEntry> = self
+            .weights
+            .iter()
+            .map(|w| match &w.source {
+                WeightSource::Path(p) => sys::AneWeightEntry {
+                    name: w.name.as_ptr(),
+                    path: p.as_ptr(),
+                    bytes: core::ptr::null(),
+                    nbytes: 0,
+                },
+                WeightSource::Bytes(b) => sys::AneWeightEntry {
+                    name: w.name.as_ptr(),
+                    path: core::ptr::null(),
+                    bytes: b.as_ptr().cast::<c_void>(),
+                    nbytes: b.len(),
+                },
+            })
+            .collect();
+        let copts = sys::AneModelOpenOptionsEx {
+            mil_path,
+            mil_bytes,
+            mil_nbytes,
+            weights: if entries.is_empty() {
+                core::ptr::null()
+            } else {
+                entries.as_ptr()
+            },
+            n_weights: i32::try_from(entries.len()).unwrap_or(i32::MAX),
+            compile_qos: self.qos,
+            is_mil_model: self.is_mil_model,
+            options_plist_json: core::ptr::null(),
+        };
+        (copts, entries)
+    }
+}
+
+/// Options for the file-based open path (`_ANEModel modelAtURL:key:`).
+#[derive(Clone, Debug)]
+pub struct OpenFileOptions {
+    model_url: CString,
+    cache_key: Option<CString>,
+    cache_url_identifier: Option<CString>,
+    identifier_source: sys::AneIdentifierSource,
+    qos: QoS,
+}
+
+impl OpenFileOptions {
+    /// Build options pointing at a compiled `.mlmodelc` or `.bundle` URL/path.
+    pub fn new<P: AsRef<Path>>(model_url: P) -> Self {
+        Self {
+            model_url: path_to_cstring(model_url.as_ref()),
+            cache_key: None,
+            cache_url_identifier: None,
+            identifier_source: sys::AneIdentifierSource::Default,
+            qos: QoS::Default,
+        }
+    }
+
+    /// Set an explicit cache key.
+    ///
+    /// # Panics
+    /// Panics if `key` contains a NUL byte.
+    #[must_use]
+    pub fn cache_key<S: Into<Vec<u8>>>(mut self, key: S) -> Self {
+        self.cache_key = Some(CString::new(key.into()).expect("cache_key contains NUL"));
+        self
+    }
+
+    /// Set an explicit cache URL identifier.
+    ///
+    /// # Panics
+    /// Panics if `id` contains a NUL byte.
+    #[must_use]
+    pub fn cache_url_identifier<S: Into<Vec<u8>>>(mut self, id: S) -> Self {
+        self.cache_url_identifier =
+            Some(CString::new(id.into()).expect("cache_url_identifier contains NUL"));
+        self
+    }
+
+    /// Choose how the cache identity is derived.
+    #[must_use]
+    pub fn identifier_source(mut self, source: sys::AneIdentifierSource) -> Self {
+        self.identifier_source = source;
+        self
+    }
+
+    /// Override the compile + load `QoS`.
+    #[must_use]
+    pub fn qos(mut self, qos: QoS) -> Self {
+        self.qos = qos;
+        self
+    }
+}
+
+impl Model {
+    /// Open via the extended path: in-memory MIL + multi-blob weights.
+    pub fn open_ex(opts: &OpenOptionsEx) -> Result<Self> {
+        let (copts, _entries) = opts.to_sys();
+        let mut raw: *mut sys::AneModel = core::ptr::null_mut();
+        // SAFETY:
+        // `copts` and the `entries` Vec it points into are owned by this
+        // stack frame and live across the call. `ane_model_open_ex`
+        // copies what it needs and writes a non-null handle on success.
+        let status = unsafe { sys::ane_model_open_ex(&raw const copts, &raw mut raw) };
+        check(status)?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "ane_model_open_ex returned OK but null handle".into(),
+            });
+        }
+        Ok(Self {
+            inner: Arc::new(ModelInner { raw }),
+        })
+    }
+
+    /// Open via the file-based path (`_ANEModel modelAtURL:key:`).
+    pub fn open_file(opts: &OpenFileOptions) -> Result<Self> {
+        let copts = sys::AneModelFileOpenOptions {
+            model_url: opts.model_url.as_ptr(),
+            cache_key: opts.cache_key.as_ref().map_or(core::ptr::null(), |c| c.as_ptr()),
+            cache_url_identifier: opts
+                .cache_url_identifier
+                .as_ref()
+                .map_or(core::ptr::null(), |c| c.as_ptr()),
+            identifier_source: opts.identifier_source,
+            compile_qos: opts.qos,
+        };
+        let mut raw: *mut sys::AneModel = core::ptr::null_mut();
+        // SAFETY: see `open_ex`.
+        let status = unsafe { sys::ane_model_open_file(&raw const copts, &raw mut raw) };
+        check(status)?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "ane_model_open_file returned OK but null handle".into(),
+            });
+        }
+        Ok(Self {
+            inner: Arc::new(ModelInner { raw }),
+        })
+    }
+
+    /// Open with the real-time priority class.
+    pub fn open_realtime(opts: &OpenOptions) -> Result<Self> {
+        let copts = sys::AneModelOpenOptions {
+            mil_path: opts.mil_path.as_ptr(),
+            weights_path: opts.weights_path.as_ptr(),
+            compile_qos: opts.qos,
+        };
+        let mut raw: *mut sys::AneModel = core::ptr::null_mut();
+        // SAFETY: see `Model::open`.
+        let status = unsafe { sys::ane_model_open_realtime(&raw const copts, &raw mut raw) };
+        check(status)?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "ane_model_open_realtime returned OK but null handle".into(),
+            });
+        }
+        Ok(Self {
+            inner: Arc::new(ModelInner { raw }),
+        })
+    }
+
+    /// Real-time variant of [`Model::open_ex`].
+    pub fn open_realtime_ex(opts: &OpenOptionsEx) -> Result<Self> {
+        let (copts, _entries) = opts.to_sys();
+        let mut raw: *mut sys::AneModel = core::ptr::null_mut();
+        // SAFETY: see `open_ex`.
+        let status = unsafe { sys::ane_model_open_realtime_ex(&raw const copts, &raw mut raw) };
+        check(status)?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "ane_model_open_realtime_ex returned OK but null handle".into(),
+            });
+        }
+        Ok(Self {
+            inner: Arc::new(ModelInner { raw }),
+        })
+    }
+
+    /// Number of procedures (entry points) declared by the loaded model. Always >= 1.
+    pub fn num_procedures(&self) -> i32 {
+        // SAFETY: read-only access to the model handle.
+        unsafe { sys::ane_model_num_procedures(self.inner.raw) }
+    }
+
+    /// Number of inputs for procedure `proc_idx`.
+    pub fn num_inputs_for_procedure(&self, proc_idx: i32) -> i32 {
+        // SAFETY: see `num_inputs`.
+        unsafe { sys::ane_model_num_inputs_for_procedure(self.inner.raw, proc_idx) }
+    }
+
+    /// Number of outputs for procedure `proc_idx`.
+    pub fn num_outputs_for_procedure(&self, proc_idx: i32) -> i32 {
+        // SAFETY: see `num_outputs`.
+        unsafe { sys::ane_model_num_outputs_for_procedure(self.inner.raw, proc_idx) }
+    }
+
+    /// Schema of input `idx` of procedure `proc_idx`.
+    pub fn input_for_procedure(&self, proc_idx: i32, idx: i32) -> Option<TensorSpec> {
+        // SAFETY: see `input`.
+        let p =
+            unsafe { sys::ane_model_input_spec_for_procedure(self.inner.raw, proc_idx, idx) };
+        tensor_spec_from_raw(p)
+    }
+
+    /// Schema of output `idx` of procedure `proc_idx`.
+    pub fn output_for_procedure(&self, proc_idx: i32, idx: i32) -> Option<TensorSpec> {
+        // SAFETY: see `output`.
+        let p =
+            unsafe { sys::ane_model_output_spec_for_procedure(self.inner.raw, proc_idx, idx) };
+        tensor_spec_from_raw(p)
+    }
+
+    /// Byte size of input `idx` of procedure `proc_idx`.
+    pub fn input_nbytes_for_procedure(&self, proc_idx: i32, idx: i32) -> usize {
+        // SAFETY: see `input_nbytes`.
+        unsafe { sys::ane_model_input_nbytes_for_procedure(self.inner.raw, proc_idx, idx) }
+    }
+
+    /// Byte size of output `idx` of procedure `proc_idx`.
+    pub fn output_nbytes_for_procedure(&self, proc_idx: i32, idx: i32) -> usize {
+        // SAFETY: see `output_nbytes`.
+        unsafe { sys::ane_model_output_nbytes_for_procedure(self.inner.raw, proc_idx, idx) }
+    }
+
+    /// Static hardware queue depth advertised for this model (max in-flight).
+    pub fn queue_depth(&self) -> i32 {
+        // SAFETY: read-only access.
+        unsafe { sys::ane_model_queue_depth(self.inner.raw) }
+    }
+
+    /// Live count of evaluations currently in flight against this model.
+    pub fn in_flight(&self) -> i64 {
+        // SAFETY: read-only access.
+        unsafe { sys::ane_model_in_flight(self.inner.raw) }
+    }
+
+    /// `hexStringIdentifier` of the loaded program (empty if absent).
+    pub fn program_id(&self) -> String {
+        // SAFETY: returns a library-owned C string.
+        unsafe { sys_str_to_string(sys::ane_model_program_id(self.inner.raw)) }
+    }
+
+    /// `weightsHash` of the descriptor (empty if absent).
+    pub fn weights_hash(&self) -> String {
+        // SAFETY: returns a library-owned C string.
+        unsafe { sys_str_to_string(sys::ane_model_weights_hash(self.inner.raw)) }
+    }
+
+    /// Opaque driver `programHandle` exposed by `_ANEModel`. `None` if absent.
+    pub fn program_handle(&self) -> Option<u64> {
+        let mut out: u64 = 0;
+        // SAFETY: writes to a stack scalar.
+        if unsafe { sys::ane_model_program_handle(self.inner.raw, &raw mut out) } {
+            Some(out)
+        } else {
+            None
+        }
+    }
+
+    /// Opaque `intermediateBufferHandle`. `None` if absent.
+    pub fn intermediate_buffer_handle(&self) -> Option<u64> {
+        let mut out: u64 = 0;
+        // SAFETY: writes to a stack scalar.
+        if unsafe { sys::ane_model_intermediate_buffer_handle(self.inner.raw, &raw mut out) } {
+            Some(out)
+        } else {
+            None
+        }
+    }
+
+    /// Set the per-model bitmask telling the driver which hardware counters to populate.
+    pub fn set_perf_stats_mask(&self, mask: u32) -> Result<()> {
+        // SAFETY: the C side reads `mask` and may mutate model-internal state.
+        check(unsafe { sys::ane_model_set_perf_stats_mask(self.inner.raw, mask) })
+    }
+
+    /// Read back the current perf-stats mask.
+    pub fn perf_stats_mask(&self) -> u32 {
+        // SAFETY: read-only access.
+        unsafe { sys::ane_model_get_perf_stats_mask(self.inner.raw) }
+    }
+}
+
+unsafe fn sys_str_to_string(p: *const c_char) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    // SAFETY: caller guarantees `p` points at a NUL-terminated C string
+    // owned by the library; we copy it into a fresh `String`.
+    unsafe { core::ffi::CStr::from_ptr(p) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+impl Buffer {
+    /// Borrowed `IOSurfaceRef` backing this buffer, exposed as a raw pointer
+    /// for Metal interop (cast to `IOSurfaceRef`). Do not release.
+    pub fn iosurface_ref(&self) -> *mut c_void {
+        // SAFETY: read-only accessor.
+        unsafe { sys::ane_buffer_iosurface_ref(self.raw) }
+    }
+
+    /// Wrap a caller-supplied `IOSurfaceRef` (as a raw pointer) in a fresh
+    /// [`Buffer`]. The surface is CFRetained; you may release your own
+    /// reference after this call returns `Ok`.
+    ///
+    /// # Safety
+    /// `surface` must be a live `IOSurfaceRef`. `nbytes` should be the
+    /// logical payload size; the framework validates it against the
+    /// surface metadata.
+    pub unsafe fn adopt_iosurface(surface: *mut c_void, nbytes: usize) -> Result<Self> {
+        let mut raw: *mut sys::AneBuffer = core::ptr::null_mut();
+        // SAFETY: see method docs.
+        let status = unsafe { sys::ane_buffer_adopt_iosurface(surface, nbytes, &raw mut raw) };
+        check(status)?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "ane_buffer_adopt_iosurface returned OK but null handle".into(),
+            });
+        }
+        Ok(Buffer { raw })
+    }
+}
+
+// =============================================================
+// Perf stats
+// =============================================================
+
+/// Hardware-counters sink. Attach to a [`Request`] before eval; read
+/// `hw_execution_ns()` after wait/run.
+pub struct PerfStats {
+    raw: *mut sys::AnePerfStats,
+}
+
+// SAFETY: the wrapped `_ANEPerformanceStats` is plain Obj-C state with no
+// thread affinity; we serialize host-side mutation via `&mut self`.
+unsafe impl Send for PerfStats {}
+
+impl PerfStats {
+    /// Allocate a fresh perf-stats sink.
+    pub fn new() -> Result<Self> {
+        let mut raw: *mut sys::AnePerfStats = core::ptr::null_mut();
+        // SAFETY: writes the new handle on success.
+        let status = unsafe { sys::ane_perf_stats_create(&raw mut raw) };
+        check(status)?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "ane_perf_stats_create returned OK but null handle".into(),
+            });
+        }
+        Ok(Self { raw })
+    }
+
+    /// Hardware execution time of the most recent eval, in nanoseconds.
+    /// Returns 0 before any eval has populated the sink.
+    pub fn hw_execution_ns(&self) -> u64 {
+        // SAFETY: read-only access.
+        unsafe { sys::ane_perf_stats_hw_execution_ns(self.raw) }
+    }
+
+    /// Copy the raw counter blob into a freshly-allocated `Vec<u8>`.
+    pub fn counters(&self) -> Vec<u8> {
+        // SAFETY: read-only access.
+        let n = unsafe { sys::ane_perf_stats_counters_nbytes(self.raw) };
+        let mut buf = vec![0u8; n];
+        // SAFETY: `buf` has exactly `n` writable bytes.
+        let copied =
+            unsafe { sys::ane_perf_stats_counters_copy(self.raw, buf.as_mut_ptr().cast(), n) };
+        buf.truncate(copied);
+        buf
+    }
+
+    pub(crate) fn raw(&self) -> *mut sys::AnePerfStats {
+        self.raw
+    }
+}
+
+impl Drop for PerfStats {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            // SAFETY: handle came from `ane_perf_stats_create` and is
+            // owned uniquely (no `Clone` impl).
+            unsafe { sys::ane_perf_stats_release(self.raw) };
+        }
+    }
+}
+
+// =============================================================
+// Shared events (GPU↔ANE sync)
+// =============================================================
+
+/// Container of signal + wait events for GPU↔ANE synchronization.
+pub struct SharedEvents {
+    raw: *mut sys::AneSharedEvents,
+}
+
+// SAFETY: the wrapped `_ANESharedEvents` is plain Obj-C state with no
+// thread affinity; host-side mutation is serialized via `&mut self`.
+unsafe impl Send for SharedEvents {}
+
+impl SharedEvents {
+    /// Allocate a fresh event container.
+    pub fn new() -> Result<Self> {
+        let mut raw: *mut sys::AneSharedEvents = core::ptr::null_mut();
+        // SAFETY: writes the new handle on success.
+        let status = unsafe { sys::ane_shared_events_create(&raw mut raw) };
+        check(status)?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "ane_shared_events_create returned OK but null handle".into(),
+            });
+        }
+        Ok(Self { raw })
+    }
+
+    /// Append a signal event. `mtl_shared_event` is the raw `id` pointer
+    /// to a Metal `MTLSharedEvent`. The container retains it.
+    ///
+    /// # Safety
+    /// `mtl_shared_event`, if non-null, must be a live Obj-C object pointer.
+    pub unsafe fn add_signal(
+        &mut self,
+        value: u64,
+        symbol_index: u32,
+        event_type: sys::AneEventType,
+        mtl_shared_event: *mut c_void,
+        agent_mask: u64,
+    ) -> Result<()> {
+        // SAFETY: see method docs.
+        check(unsafe {
+            sys::ane_shared_events_add_signal(
+                self.raw,
+                value,
+                symbol_index,
+                event_type,
+                mtl_shared_event,
+                agent_mask,
+            )
+        })
+    }
+
+    /// Append a wait event.
+    ///
+    /// # Safety
+    /// Same contract as [`SharedEvents::add_signal`] on `mtl_shared_event`.
+    pub unsafe fn add_wait(
+        &mut self,
+        value: u64,
+        mtl_shared_event: *mut c_void,
+        event_type: sys::AneEventType,
+    ) -> Result<()> {
+        // SAFETY: see method docs.
+        check(unsafe {
+            sys::ane_shared_events_add_wait(self.raw, value, mtl_shared_event, event_type)
+        })
+    }
+
+    /// Number of signal events queued.
+    pub fn num_signals(&self) -> i32 {
+        // SAFETY: read-only.
+        unsafe { sys::ane_shared_events_num_signals(self.raw) }
+    }
+
+    /// Number of wait events queued.
+    pub fn num_waits(&self) -> i32 {
+        // SAFETY: read-only.
+        unsafe { sys::ane_shared_events_num_waits(self.raw) }
+    }
+
+    pub(crate) fn raw(&self) -> *mut sys::AneSharedEvents {
+        self.raw
+    }
+}
+
+impl Drop for SharedEvents {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            // SAFETY: handle came from `ane_shared_events_create` and is
+            // owned uniquely.
+            unsafe { sys::ane_shared_events_release(self.raw) };
+        }
+    }
+}
+
+// =============================================================
+// Extended request configuration
+// =============================================================
+
+impl Request {
+    /// Per-request weight override. The buffer is retained by `self` and
+    /// kept alive until cleared or the request drops.
+    pub fn set_weights(&mut self, weights: Option<Buffer>) -> Result<()> {
+        let ptr = weights.as_ref().map_or(core::ptr::null_mut(), Buffer::raw);
+        // SAFETY: `self.raw` is live; the C side just stores the pointer.
+        let status = unsafe { sys::ane_request_set_weights(self.raw, ptr) };
+        check(status)?;
+        self.weights_buf = weights;
+        Ok(())
+    }
+
+    /// Select which procedure (entry point) this request targets.
+    pub fn set_procedure_index(&mut self, proc_idx: i32) -> Result<()> {
+        // SAFETY: integer setter on a live request.
+        check(unsafe { sys::ane_request_set_procedure_index(self.raw, proc_idx) })
+    }
+
+    /// Currently-set procedure index. Defaults to 0.
+    pub fn procedure_index(&self) -> i32 {
+        // SAFETY: read-only access.
+        unsafe { sys::ane_request_procedure_index(self.raw) }
+    }
+
+    /// Attach a [`PerfStats`] sink for the next eval. The sink is retained
+    /// by `self` until cleared.
+    pub fn set_perf_stats(&mut self, ps: Option<PerfStats>) -> Result<()> {
+        let ptr = ps.as_ref().map_or(core::ptr::null_mut(), PerfStats::raw);
+        // SAFETY: pointer setter on a live request.
+        let status = unsafe { sys::ane_request_set_perf_stats(self.raw, ptr) };
+        check(status)?;
+        self.perf_stats = ps;
+        Ok(())
+    }
+
+    /// Borrow the currently-attached perf-stats sink, if any.
+    pub fn perf_stats(&self) -> Option<&PerfStats> {
+        self.perf_stats.as_ref()
+    }
+
+    /// Attach a [`SharedEvents`] container for GPU↔ANE synchronization.
+    pub fn set_shared_events(&mut self, ev: Option<SharedEvents>) -> Result<()> {
+        let ptr = ev.as_ref().map_or(core::ptr::null_mut(), SharedEvents::raw);
+        // SAFETY: pointer setter on a live request.
+        let status = unsafe { sys::ane_request_set_shared_events(self.raw, ptr) };
+        check(status)?;
+        self.shared_events = ev;
+        Ok(())
+    }
+
+    /// Set the transaction handle used to group this request with others.
+    pub fn set_transaction(&mut self, handle: u64) -> Result<()> {
+        // SAFETY: scalar setter on a live request.
+        check(unsafe { sys::ane_request_set_transaction(self.raw, handle) })
+    }
+
+    /// Currently-set transaction handle.
+    pub fn transaction(&self) -> u64 {
+        // SAFETY: read-only access.
+        unsafe { sys::ane_request_transaction(self.raw) }
+    }
+}
+
+// =============================================================
+// Chained dispatch
+// =============================================================
+
+/// A multi-stage pipeline submitted as one ANE dispatch.
+///
+/// Build one stage per [`Request`] (with its bindings, procedure index,
+/// and shared events already configured), call [`Chain::prepare`] once,
+/// then [`Chain::enqueue`] repeatedly.
+pub struct Chain {
+    raw: *mut sys::AneChain,
+    _requests: Vec<Request>,
+}
+
+// SAFETY: the wrapped `_ANEChainingRequest` array is Obj-C state with no
+// thread affinity; host-side use is single-owner.
+unsafe impl Send for Chain {}
+
+/// Parameters wiring one stage into a [`Chain`].
+#[derive(Clone, Debug, Default)]
+pub struct ChainLink {
+    /// Loopback input symbol id matching the previous stage's output.
+    pub lb_input_symbol_id: i64,
+    /// Loopback output symbol id feeding the next stage's input.
+    pub lb_output_symbol_id: i64,
+    /// Firmware enqueue delay in nanoseconds.
+    pub fw_enqueue_delay: u64,
+    /// Shared intermediate memory pool id. 0 = no pool.
+    pub memory_pool_id: u64,
+}
+
+impl Chain {
+    /// Build a chain from already-configured requests + their inter-stage links.
+    pub fn new(stages: Vec<(Request, ChainLink)>) -> Result<Self> {
+        if stages.is_empty() {
+            return Err(Error {
+                status: sys::AneStatus::InvalidArg,
+                message: "Chain::new: empty stages".into(),
+            });
+        }
+        let mut requests: Vec<Request> = Vec::with_capacity(stages.len());
+        let mut steps: Vec<sys::AneChainStep> = Vec::with_capacity(stages.len());
+        for (req, link) in stages {
+            steps.push(sys::AneChainStep {
+                request: req.raw,
+                lb_input_symbol_id: link.lb_input_symbol_id,
+                lb_output_symbol_id: link.lb_output_symbol_id,
+                fw_enqueue_delay: link.fw_enqueue_delay,
+                memory_pool_id: link.memory_pool_id,
+            });
+            requests.push(req);
+        }
+        let mut raw: *mut sys::AneChain = core::ptr::null_mut();
+        // SAFETY: `steps` lives across the call; the C side reads it once.
+        let status = unsafe {
+            sys::ane_chain_create(
+                steps.as_ptr(),
+                i32::try_from(steps.len()).unwrap_or(i32::MAX),
+                &raw mut raw,
+            )
+        };
+        check(status)?;
+        Ok(Self {
+            raw,
+            _requests: requests,
+        })
+    }
+
+    /// One-time preparation: maps intermediate buffers and resolves
+    /// loopback symbols.
+    pub fn prepare(&mut self, qos: QoS) -> Result<()> {
+        // SAFETY: live handle owned by `self`.
+        check(unsafe { sys::ane_chain_prepare(self.raw, qos) })
+    }
+
+    /// Submit the chain. May be called repeatedly after a successful prepare.
+    pub fn enqueue(&mut self, qos: QoS) -> Result<()> {
+        // SAFETY: live handle owned by `self`.
+        check(unsafe { sys::ane_chain_enqueue(self.raw, qos) })
+    }
+
+    /// Block up to `timeout_ms` for the most recent enqueue to complete.
+    /// Negative = forever, zero = poll.
+    pub fn wait(&mut self, timeout_ms: i32) -> Result<()> {
+        // SAFETY: live handle owned by `self`.
+        check(unsafe { sys::ane_chain_wait(self.raw, timeout_ms) })
+    }
+}
+
+impl Drop for Chain {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            // SAFETY: handle came from `ane_chain_create` and is owned uniquely.
+            unsafe { sys::ane_chain_release(self.raw) };
+        }
+    }
+}
+
+// =============================================================
+// Weight decompression
+// =============================================================
+
+// =============================================================
+// Connection management
+// =============================================================
+
+/// Number of `aned` connections currently open in this process for loading models.
+pub fn num_client_connections() -> i32 {
+    // SAFETY: parameter-less FFI call returning a scalar.
+    unsafe { sys::ane_client_num_connections() }
+}
+
+// =============================================================
+// Session hints
+// =============================================================
+
+/// Load-tuning hint passed to `_ANEVirtualClient.sessionHintWithModel:`.
+pub struct SessionHint {
+    raw: *mut sys::AneSessionHint,
+}
+
+// SAFETY: the inner C struct is a plain enum-carrying box with no thread affinity.
+unsafe impl Send for SessionHint {}
+
+impl SessionHint {
+    /// Allocate a fresh session hint of the given kind.
+    pub fn new(kind: sys::AneSessionHintKind) -> Result<Self> {
+        let mut raw: *mut sys::AneSessionHint = core::ptr::null_mut();
+        // SAFETY: writes the new handle on success.
+        let status = unsafe { sys::ane_session_hint_create(kind, &raw mut raw) };
+        check(status)?;
+        Ok(Self { raw })
+    }
+}
+
+impl Drop for SessionHint {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            // SAFETY: handle came from `ane_session_hint_create`.
+            unsafe { sys::ane_session_hint_release(self.raw) };
+        }
+    }
+}
+
+// =============================================================
+// Extended file open (mpsConstants / modelAttributes overrides)
+// =============================================================
+
+/// Extended file-open options. Wraps [`OpenFileOptions`] and adds
+/// pointers to caller-owned Obj-C `NSDictionary*` objects for MPS
+/// constants and `modelAttributes` overrides.
+pub struct OpenFileOptionsEx {
+    base: OpenFileOptions,
+    mps_constants_id: *mut c_void,
+    model_attributes_id: *mut c_void,
+}
+
+impl OpenFileOptionsEx {
+    /// Wrap a base set of file-open options.
+    pub fn new(base: OpenFileOptions) -> Self {
+        Self {
+            base,
+            mps_constants_id: core::ptr::null_mut(),
+            model_attributes_id: core::ptr::null_mut(),
+        }
+    }
+
+    /// Set the Metal Performance Shaders constants dictionary.
+    ///
+    /// # Safety
+    /// `id` must be a live Obj-C `NSDictionary*` (or null) for the
+    /// duration of the open call.
+    #[must_use]
+    pub unsafe fn mps_constants(mut self, id: *mut c_void) -> Self {
+        self.mps_constants_id = id;
+        self
+    }
+
+    /// Override `modelAttributes` with a caller-supplied dictionary.
+    ///
+    /// # Safety
+    /// Same contract as [`Self::mps_constants`].
+    #[must_use]
+    pub unsafe fn model_attributes(mut self, id: *mut c_void) -> Self {
+        self.model_attributes_id = id;
+        self
+    }
+}
+
+// =============================================================
+// Extended model accessors / lifecycle
+// =============================================================
+
+impl Model {
+    /// `_ANEModel.UUID` string. Empty when absent.
+    pub fn uuid(&self) -> String {
+        // SAFETY: library-owned string accessor.
+        unsafe { sys_str_to_string(sys::ane_model_uuid(self.inner.raw)) }
+    }
+    /// Absolute string of the original source URL, when known.
+    pub fn source_url(&self) -> String {
+        // SAFETY: library-owned string accessor.
+        unsafe { sys_str_to_string(sys::ane_model_source_url(self.inner.raw)) }
+    }
+    /// Absolute string of the compiled-bundle URL, when loaded from disk.
+    pub fn model_url(&self) -> String {
+        // SAFETY: library-owned string accessor.
+        unsafe { sys_str_to_string(sys::ane_model_model_url(self.inner.raw)) }
+    }
+    /// Cache key currently associated with the loaded model.
+    pub fn key(&self) -> String {
+        // SAFETY: library-owned string accessor.
+        unsafe { sys_str_to_string(sys::ane_model_key(self.inner.raw)) }
+    }
+    /// `cacheURLIdentifier` of the loaded model, when set.
+    pub fn cache_url_identifier(&self) -> String {
+        // SAFETY: library-owned string accessor.
+        unsafe { sys_str_to_string(sys::ane_model_cache_url_identifier(self.inner.raw)) }
+    }
+    /// Raw `identifierSource` enum value reported by the framework.
+    pub fn identifier_source(&self) -> i64 {
+        // SAFETY: scalar accessor.
+        unsafe { sys::ane_model_identifier_source(self.inner.raw) }
+    }
+    /// True if the underlying `_ANEClient` is a virtual (per-process) client.
+    pub fn is_virtual_client(&self) -> bool {
+        // SAFETY: scalar accessor.
+        unsafe { sys::ane_model_is_virtual_client(self.inner.raw) }
+    }
+
+    /// Request that transient state be reset on the next unload.
+    pub fn reset_on_unload(&self) -> Result<()> {
+        // SAFETY: takes a live model handle; framework mutates internal state.
+        check(unsafe { sys::ane_model_reset_on_unload(self.inner.raw) })
+    }
+
+    /// Explicitly unload the model (without freeing the handle).
+    pub fn unload(&self) -> Result<()> {
+        // SAFETY: takes a live model handle.
+        check(unsafe { sys::ane_model_unload(self.inner.raw) })
+    }
+
+    /// Load a fresh runtime instance sharing the same compiled program.
+    /// Useful for the train-from-checkpoint pattern.
+    pub fn new_instance(&self, key: Option<&str>, qos: QoS) -> Result<Self> {
+        let key_c = key
+            .map(|k| {
+                CString::new(k).map_err(|_| Error {
+                    status: sys::AneStatus::InvalidArg,
+                    message: "key contains NUL".into(),
+                })
+            })
+            .transpose()?;
+        let params = sys::AneModelInstanceParams {
+            key: key_c.as_ref().map_or(core::ptr::null(), |c| c.as_ptr()),
+            flags: 0,
+        };
+        let mut raw: *mut sys::AneModel = core::ptr::null_mut();
+        // SAFETY: writes the new handle on success; reads `params` once.
+        let status = unsafe {
+            sys::ane_model_new_instance(self.inner.raw, &raw const params, qos, &raw mut raw)
+        };
+        check(status)?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "ane_model_new_instance returned OK but null handle".into(),
+            });
+        }
+        Ok(Self {
+            inner: Arc::new(ModelInner { raw }),
+        })
+    }
+
+    /// Apply a session hint to this model. Returns the framework's
+    /// per-hint report as a UTF-8 JSON string (empty if none).
+    pub fn apply_session_hint(&self, hint: &SessionHint) -> Result<String> {
+        let mut report_ptr: *mut c_char = core::ptr::null_mut();
+        // SAFETY: writes a freshly-malloc'd C string into `report_ptr` on success.
+        let status = unsafe {
+            sys::ane_model_apply_session_hint(self.inner.raw, hint.raw, &raw mut report_ptr)
+        };
+        check(status)?;
+        if report_ptr.is_null() {
+            return Ok(String::new());
+        }
+        // SAFETY: `report_ptr` was malloc'd by C; we copy and free here.
+        let s = unsafe { CStr::from_ptr(report_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        // SAFETY: pair the C-side `malloc` with `free`.
+        unsafe {
+            unsafe extern "C" {
+                fn free(p: *mut c_void);
+            }
+            free(report_ptr.cast::<c_void>());
+        }
+        Ok(s)
+    }
+
+    /// Open via the extended file path with MPS constants / attribute overrides.
+    pub fn open_file_ex(opts: &OpenFileOptionsEx) -> Result<Self> {
+        let base = sys::AneModelFileOpenOptions {
+            model_url: opts.base.model_url.as_ptr(),
+            cache_key: opts
+                .base
+                .cache_key
+                .as_ref()
+                .map_or(core::ptr::null(), |c| c.as_ptr()),
+            cache_url_identifier: opts
+                .base
+                .cache_url_identifier
+                .as_ref()
+                .map_or(core::ptr::null(), |c| c.as_ptr()),
+            identifier_source: opts.base.identifier_source,
+            compile_qos: opts.base.qos,
+        };
+        let copts = sys::AneModelFileOpenOptionsEx {
+            base,
+            mps_constants_id: opts.mps_constants_id,
+            model_attributes_id: opts.model_attributes_id,
+        };
+        let mut raw: *mut sys::AneModel = core::ptr::null_mut();
+        // SAFETY: `copts` lives across the call; the C side reads it once.
+        let status = unsafe { sys::ane_model_open_file_ex(&raw const copts, &raw mut raw) };
+        check(status)?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "ane_model_open_file_ex returned OK but null handle".into(),
+            });
+        }
+        Ok(Self {
+            inner: Arc::new(ModelInner { raw }),
+        })
+    }
+}
+
+// =============================================================
+// Perf counter naming + signposts
+// =============================================================
+
+/// Human-readable name of perf counter `counter_idx`.
+pub fn perf_counter_name(counter_idx: i32) -> String {
+    // SAFETY: library-owned thread-local buffer.
+    unsafe { sys_str_to_string(sys::ane_perf_counter_name(counter_idx)) }
+}
+
+impl PerfStats {
+    /// Emit `os_signpost` events keyed by `model_string_id` for the
+    /// counters captured by this sink.
+    pub fn emit_signpost(&self, model_string_id: u64) -> Result<()> {
+        // SAFETY: read-only access to a live handle.
+        check(unsafe { sys::ane_perf_stats_emit_signpost(self.raw, model_string_id) })
+    }
+}
+
+impl Request {
+    /// Number of per-stage perf-stats slots on this request.
+    /// For a single-stage request this is 0 or 1; for a chained request
+    /// it equals the number of stages.
+    pub fn num_perf_stats(&self) -> i32 {
+        // SAFETY: read-only access.
+        unsafe { sys::ane_request_num_perf_stats(self.raw) }
+    }
+}
+
+// =============================================================
+// Weight decompression
+// =============================================================
+
+/// Route a compressed weight blob through the framework's parallel
+/// decompressor and return the decompressed bytes.
+pub fn decompress_weights(compressed: &[u8]) -> Result<Vec<u8>> {
+    let mut out_ptr: *mut c_void = core::ptr::null_mut();
+    let mut out_n: usize = 0;
+    // SAFETY: `compressed` lives for the call; the C side either fills the
+    // out-params or returns an error and leaves them unchanged.
+    let status = unsafe {
+        sys::ane_decompress_weights(
+            compressed.as_ptr().cast(),
+            compressed.len(),
+            &raw mut out_ptr,
+            &raw mut out_n,
+        )
+    };
+    check(status)?;
+    if out_ptr.is_null() {
+        return Ok(Vec::new());
+    }
+    // SAFETY: the C side allocated `out_n` bytes via `malloc`; we copy out
+    // and free the original allocation to match the documented contract.
+    let bytes = unsafe { core::slice::from_raw_parts(out_ptr.cast::<u8>(), out_n).to_vec() };
+    // SAFETY: `out_ptr` was returned by `malloc`; freeing matches the contract.
+    unsafe {
+        unsafe extern "C" {
+            fn free(p: *mut c_void);
+        }
+        free(out_ptr);
+    }
+    Ok(bytes)
 }

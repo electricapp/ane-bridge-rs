@@ -15,11 +15,19 @@
 #import <dlfcn.h>
 #import <objc/runtime.h>
 
-Class g_AneDescriptorCls = nil;
-Class g_AneInMemoryCls   = nil;
-Class g_AneRequestCls    = nil;
-Class g_AneIOSurfaceCls  = nil;
-Class g_AneClientCls     = nil;
+Class g_AneDescriptorCls        = nil;
+Class g_AneInMemoryCls          = nil;
+Class g_AneRequestCls           = nil;
+Class g_AneIOSurfaceCls         = nil;
+Class g_AneClientCls            = nil;
+Class g_AneModelCls             = nil;
+Class g_AneVirtualClientCls     = nil;
+Class g_AnePerfStatsCls         = nil;
+Class g_AneSharedEventsCls      = nil;
+Class g_AneSharedSignalEventCls = nil;
+Class g_AneSharedWaitEventCls   = nil;
+Class g_AneChainingRequestCls   = nil;
+Class g_AneProgramForEvalCls    = nil;
 
 static id stub_getUUID(id self, SEL _cmd) {
     (void)self; (void)_cmd;
@@ -71,11 +79,19 @@ BOOL ane_private_load(void) {
          * outside it (dispatch_once includes the necessary fences), so
          * by the time another thread observes `ok = YES` it must also
          * observe these class globals as their final values. */
-        g_AneDescriptorCls = d;
-        g_AneInMemoryCls   = im;
-        g_AneRequestCls    = rq;
-        g_AneIOSurfaceCls  = iio;
-        g_AneClientCls     = cl;
+        g_AneDescriptorCls        = d;
+        g_AneInMemoryCls          = im;
+        g_AneRequestCls           = rq;
+        g_AneIOSurfaceCls         = iio;
+        g_AneClientCls            = cl;
+        g_AneModelCls             = NSClassFromString(@"_ANEModel");
+        g_AneVirtualClientCls     = NSClassFromString(@"_ANEVirtualClient");
+        g_AnePerfStatsCls         = NSClassFromString(@"_ANEPerformanceStats");
+        g_AneSharedEventsCls      = NSClassFromString(@"_ANESharedEvents");
+        g_AneSharedSignalEventCls = NSClassFromString(@"_ANESharedSignalEvent");
+        g_AneSharedWaitEventCls   = NSClassFromString(@"_ANESharedWaitEvent");
+        g_AneChainingRequestCls   = NSClassFromString(@"_ANEChainingRequest");
+        g_AneProgramForEvalCls    = NSClassFromString(@"_ANEProgramForEvaluation");
         ok = YES;
     });
     return ok;

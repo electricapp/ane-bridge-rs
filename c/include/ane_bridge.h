@@ -237,6 +237,352 @@ const char* ane_request_last_error(const AneRequest* req);
 const char* ane_bridge_version(void);
 
 /* =====================================================================
+ * Device info
+ * ===================================================================== */
+
+typedef struct AneDeviceInfo {
+    int32_t num_cores;
+    int32_t num_anes;
+    bool    has_ane;
+    int64_t board_type;
+    char    arch_type[32];
+} AneDeviceInfo;
+
+AneStatus ane_device_info(AneDeviceInfo* out);
+
+/* =====================================================================
+ * Multi-procedure schema
+ * ===================================================================== */
+
+int32_t  ane_model_num_procedures(const AneModel* model);
+
+int32_t  ane_model_num_inputs_for_procedure (const AneModel* model, int32_t proc_idx);
+int32_t  ane_model_num_outputs_for_procedure(const AneModel* model, int32_t proc_idx);
+
+const AneTensorSpec* ane_model_input_spec_for_procedure (const AneModel* model, int32_t proc_idx, int32_t idx);
+const AneTensorSpec* ane_model_output_spec_for_procedure(const AneModel* model, int32_t proc_idx, int32_t idx);
+
+size_t ane_model_input_nbytes_for_procedure (const AneModel* model, int32_t proc_idx, int32_t idx);
+size_t ane_model_output_nbytes_for_procedure(const AneModel* model, int32_t proc_idx, int32_t idx);
+
+/* =====================================================================
+ * Queue depth / in-flight telemetry
+ * ===================================================================== */
+
+int32_t ane_model_queue_depth(const AneModel* model);
+int64_t ane_model_in_flight  (const AneModel* model);
+
+/* =====================================================================
+ * Identity / cache telemetry
+ * ===================================================================== */
+
+const char* ane_model_program_id   (const AneModel* model);  /* hexStringIdentifier */
+const char* ane_model_weights_hash (const AneModel* model);  /* descriptor weightsHash */
+bool        ane_model_program_handle(const AneModel* model, uint64_t* out);
+bool        ane_model_intermediate_buffer_handle(const AneModel* model, uint64_t* out);
+
+bool        ane_cache_exists_for_hash(const char* hex_hash);
+AneStatus   ane_cache_purge_for_hash (const char* hex_hash);
+
+/* =====================================================================
+ * Extended open: in-memory MIL bytes + multi-blob NSDictionary weights
+ * ===================================================================== */
+
+typedef struct AneWeightEntry {
+    /* Key name inside the weights NSDictionary. Required. */
+    const char* name;
+    /* Exactly one of (path) OR (bytes,nbytes) must be set. */
+    const char* path;
+    const void* bytes;
+    size_t      nbytes;
+} AneWeightEntry;
+
+typedef struct AneModelOpenOptionsEx {
+    /* Provide MIL either by path or by in-memory bytes. */
+    const char* mil_path;
+    const void* mil_bytes;
+    size_t      mil_nbytes;
+
+    /* Multiple named weight blobs. NULL+0 is permitted for weight-less
+     * MIL programs. */
+    const AneWeightEntry* weights;
+    int32_t                n_weights;
+
+    AneQoS compile_qos;
+
+    /* When false, MIL text is treated as a NetworkDescription
+     * (non-MIL legacy input format). Default true. */
+    bool is_mil_model;
+
+    /* Optional options plist; pass NULL for none. JSON-encoded UTF-8. */
+    const char* options_plist_json;
+} AneModelOpenOptionsEx;
+
+AneStatus ane_model_open_ex(const AneModelOpenOptionsEx* opts, AneModel** out_model);
+
+/* =====================================================================
+ * File-based open path (_ANEModel modelAtURL:key:)
+ * ===================================================================== */
+
+typedef enum AneIdentifierSource {
+    ANE_IDENT_DEFAULT  = 0,
+    ANE_IDENT_URL      = 1,
+    ANE_IDENT_UUID     = 2,
+    ANE_IDENT_CONTENT  = 3,
+} AneIdentifierSource;
+
+typedef struct AneModelFileOpenOptions {
+    /* Compiled .mlmodelc / .bundle directory URL or file path. Required. */
+    const char* model_url;
+    /* Explicit cache key. NULL → derive from URL. */
+    const char* cache_key;
+    /* Optional cacheURLIdentifier. NULL → derive. */
+    const char* cache_url_identifier;
+    /* See `AneIdentifierSource`. */
+    AneIdentifierSource identifier_source;
+    AneQoS              compile_qos;
+} AneModelFileOpenOptions;
+
+AneStatus ane_model_open_file(const AneModelFileOpenOptions* opts, AneModel** out_model);
+
+/* =====================================================================
+ * Real-time priority class
+ * ===================================================================== */
+
+AneStatus ane_model_open_realtime   (const AneModelOpenOptions* opts, AneModel** out_model);
+AneStatus ane_model_open_realtime_ex(const AneModelOpenOptionsEx* opts, AneModel** out_model);
+AneStatus ane_realtime_task_begin(void);
+AneStatus ane_realtime_task_end  (void);
+
+/* =====================================================================
+ * Performance stats
+ * ===================================================================== */
+
+typedef struct AnePerfStats AnePerfStats;
+
+AneStatus ane_perf_stats_create(AnePerfStats** out);
+void      ane_perf_stats_release(AnePerfStats* ps);
+
+/* Hardware execution time of the most recent eval that referenced this
+ * stats object, in nanoseconds. 0 if not yet populated. */
+uint64_t  ane_perf_stats_hw_execution_ns(const AnePerfStats* ps);
+
+/* Raw counter blob; size first via *_nbytes then copy with *_copy. */
+size_t    ane_perf_stats_counters_nbytes(const AnePerfStats* ps);
+size_t    ane_perf_stats_counters_copy  (const AnePerfStats* ps, void* out, size_t cap);
+
+/* Per-model mask controlling which hardware counters are populated.
+ * Set BEFORE `ane_request_run`/`submit`. */
+AneStatus ane_model_set_perf_stats_mask(AneModel* model, uint32_t mask);
+uint32_t  ane_model_get_perf_stats_mask(const AneModel* model);
+
+/* =====================================================================
+ * GPU↔ANE shared event sync (Metal interop)
+ * ===================================================================== */
+
+typedef struct AneSharedEvents AneSharedEvents;
+
+typedef enum AneEventType {
+    ANE_EVT_DEFAULT      = 0,
+    ANE_EVT_INFERENCE    = 1,
+    ANE_EVT_COMPLETION   = 2,
+} AneEventType;
+
+AneStatus ane_shared_events_create(AneSharedEvents** out);
+void      ane_shared_events_release(AneSharedEvents* ev);
+
+/* `mtl_shared_event` is a (void*)id pointer to a Metal `MTLSharedEvent`
+ * (or compatible). It is retained by the events object.
+ *
+ * `agent_mask` selects which ANE agent should signal. Pass 0 for default. */
+AneStatus ane_shared_events_add_signal(AneSharedEvents* ev,
+                                       uint64_t      value,
+                                       uint32_t      symbol_index,
+                                       AneEventType  event_type,
+                                       void*         mtl_shared_event,
+                                       uint64_t      agent_mask);
+
+AneStatus ane_shared_events_add_wait  (AneSharedEvents* ev,
+                                       uint64_t      value,
+                                       void*         mtl_shared_event,
+                                       AneEventType  event_type);
+
+int32_t   ane_shared_events_num_signals(const AneSharedEvents* ev);
+int32_t   ane_shared_events_num_waits  (const AneSharedEvents* ev);
+
+/* =====================================================================
+ * Extended request configuration
+ * ===================================================================== */
+
+/* Per-request weights override. The buffer remains caller-owned and
+ * must outlive the request (or until cleared by passing NULL). */
+AneStatus ane_request_set_weights        (AneRequest* req, AneBuffer* weights);
+AneStatus ane_request_set_procedure_index(AneRequest* req, int32_t proc_idx);
+AneStatus ane_request_set_perf_stats     (AneRequest* req, AnePerfStats* ps);
+AneStatus ane_request_set_shared_events  (AneRequest* req, AneSharedEvents* ev);
+AneStatus ane_request_set_transaction    (AneRequest* req, uint64_t handle);
+
+int32_t   ane_request_procedure_index(const AneRequest* req);
+uint64_t  ane_request_transaction    (const AneRequest* req);
+
+/* =====================================================================
+ * IOSurface interop
+ * ===================================================================== */
+
+/* Returns a borrowed `IOSurfaceRef`. Caller must NOT release it.
+ * Cast the returned `void*` to `IOSurfaceRef` after including
+ * <IOSurface/IOSurfaceRef.h>. */
+void*     ane_buffer_iosurface_ref(const AneBuffer* buf);
+
+/* Adopt a caller-owned `IOSurfaceRef` into a fresh `AneBuffer`.
+ * The buffer retains the surface; you may release your own reference
+ * after this call returns OK. `nbytes` is the logical payload size. */
+AneStatus ane_buffer_adopt_iosurface(void* iosurface_ref, size_t nbytes, AneBuffer** out);
+
+/* =====================================================================
+ * Multi-model chaining (_ANEChainingRequest)
+ * ===================================================================== */
+
+typedef struct AneChain AneChain;
+
+typedef struct AneChainStep {
+    /* Request whose bindings define this stage's I/O. The request's
+     * model + buffers + procedure index + signal events are used.
+     * The request must already have its inputs/outputs bound. */
+    AneRequest* request;
+
+    /* Loopback symbol IDs wiring this stage's output to the next
+     * stage's input inside ANE without a host round-trip. */
+    int64_t lb_input_symbol_id;
+    int64_t lb_output_symbol_id;
+
+    /* Firmware enqueue delay in nanoseconds (0 = no delay). */
+    uint64_t fw_enqueue_delay;
+
+    /* Shared intermediate memory pool ID for this step (0 = no pool). */
+    uint64_t memory_pool_id;
+} AneChainStep;
+
+AneStatus ane_chain_create  (const AneChainStep* steps, int32_t n_steps, AneChain** out);
+AneStatus ane_chain_prepare (AneChain* chain, AneQoS qos);
+AneStatus ane_chain_enqueue (AneChain* chain, AneQoS qos);
+AneStatus ane_chain_wait    (AneChain* chain, int32_t timeout_ms);
+void      ane_chain_release (AneChain* chain);
+
+/* =====================================================================
+ * Model accessors (post-load identity + state)
+ * ===================================================================== */
+
+const char* ane_model_uuid                (const AneModel* model);
+const char* ane_model_source_url          (const AneModel* model);
+const char* ane_model_model_url           (const AneModel* model);
+const char* ane_model_key                 (const AneModel* model);
+const char* ane_model_cache_url_identifier(const AneModel* model);
+int64_t     ane_model_identifier_source   (const AneModel* model);
+
+AneStatus   ane_model_reset_on_unload(AneModel* model);
+AneStatus   ane_model_unload         (AneModel* model);
+
+/* =====================================================================
+ * Load a fresh instance of an already-compiled model
+ *
+ * Returns a second `AneModel*` that shares the compiled program with
+ * `src` but owns its own runtime state. Useful for the
+ * train-from-checkpoint pattern (one instance per parameter snapshot)
+ * without re-paying the compile.
+ * ===================================================================== */
+
+typedef struct AneModelInstanceParams {
+    /* Optional explicit key override; NULL inherits from `src`. */
+    const char* key;
+    /* Reserved; pass 0. */
+    uint64_t    flags;
+} AneModelInstanceParams;
+
+AneStatus ane_model_new_instance(AneModel* src,
+                                 const AneModelInstanceParams* params,
+                                 AneQoS qos,
+                                 AneModel** out);
+
+/* =====================================================================
+ * Connection management
+ * ===================================================================== */
+
+int32_t ane_client_num_connections   (void);
+bool    ane_model_is_virtual_client  (const AneModel* model);
+
+/* =====================================================================
+ * Session hints (load-tuning advisories)
+ * ===================================================================== */
+
+typedef struct AneSessionHint AneSessionHint;
+
+typedef enum AneSessionHintKind {
+    ANE_HINT_PREFETCH       = 1,
+    ANE_HINT_LOW_LATENCY    = 2,
+    ANE_HINT_HIGH_THROUGHPUT = 3,
+} AneSessionHintKind;
+
+AneStatus ane_session_hint_create (AneSessionHintKind kind, AneSessionHint** out);
+void      ane_session_hint_release(AneSessionHint* hint);
+
+/* Apply `hint` to `model`. Writes the framework's per-hint report
+ * (an opaque NSData/NSDictionary description) into a freshly-malloc'd
+ * UTF-8 string at `*out_report_json` if non-NULL; caller frees with
+ * `free()`. */
+AneStatus ane_model_apply_session_hint(AneModel* model,
+                                       const AneSessionHint* hint,
+                                       char** out_report_json);
+
+/* =====================================================================
+ * Metal Performance Shaders constants (file-open interop)
+ *
+ * `mps_constants_id` is an Obj-C `id` pointer to an
+ * `NSDictionary*` (or compatible) keyed by MPS constant names.
+ * Pass NULL when not using MPS.
+ * ===================================================================== */
+
+typedef struct AneModelFileOpenOptionsEx {
+    AneModelFileOpenOptions base;
+    void* mps_constants_id;
+    /* Optional dictionary of `modelAttributes` overrides;
+     * NSDictionary id, may be NULL. */
+    void* model_attributes_id;
+} AneModelFileOpenOptionsEx;
+
+AneStatus ane_model_open_file_ex(const AneModelFileOpenOptionsEx* opts,
+                                 AneModel** out_model);
+
+/* =====================================================================
+ * Performance counter naming / signpost emission
+ * ===================================================================== */
+
+/* Name of perf counter at index `counter_idx`. Library-owned; empty on
+ * out-of-range. */
+const char* ane_perf_counter_name(int32_t counter_idx);
+
+/* Emit os_signpost events for the perf counters captured by `ps`. */
+AneStatus ane_perf_stats_emit_signpost(const AnePerfStats* ps, uint64_t model_string_id);
+
+/* Number of per-stage stats objects on a chained request. Returns 0 if
+ * the underlying `_ANERequest` has no `perfStatsArray`. */
+int32_t ane_request_num_perf_stats(const AneRequest* req);
+
+/* Copy out the perf-stats object at `idx`. Returns NULL on out-of-range. */
+AnePerfStats* ane_request_perf_stats_at(const AneRequest* req, int32_t idx);
+
+/* =====================================================================
+ * Cached-bundle / weight decompression
+ * ===================================================================== */
+
+/* If the framework exposes a parallel decompressor for compressed weight
+ * blobs, this routes through it. Returns OK and writes the decompressed
+ * bytes to a freshly malloc()'d buffer in `*out_bytes`; caller frees
+ * with `free()`. */
+AneStatus ane_decompress_weights(const void* compressed, size_t compressed_nbytes,
+                                 void** out_bytes, size_t* out_nbytes);
+
+/* =====================================================================
  * Internal test hooks (NOT part of the stable API)
  *
  * These functions exist purely so Rust integration tests can exercise

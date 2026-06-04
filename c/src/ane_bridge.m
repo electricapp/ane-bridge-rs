@@ -201,12 +201,25 @@ typedef struct {
     size_t  nbytes;
 } OwnedSpec;
 
+typedef struct ProcSpecs {
+    int32_t        num_inputs;
+    int32_t        num_outputs;
+    OwnedSpec*     input_specs;
+    OwnedSpec*     output_specs;
+    AneTensorSpec* input_view;
+    AneTensorSpec* output_view;
+} ProcSpecs;
+
 struct AneModel {
     NSData*    mil_data;
     NSData*    weights_data;
+    NSMutableArray* extra_weights_data;
     id         descriptor;
     id         in_memory_model;
     id         client;
+    bool       is_realtime;
+    bool       is_secondary_instance;  /* shares in_memory_model with primary; do not unload/release on close */
+    uint32_t   perf_stats_mask;
     /* `temp_dir` is `NSTemporaryDirectory()/<hex_id>/` populated with
      * `model.mil` + `weights/weight.bin`. `_ANECompiler` reads those
      * files (its `ANECCompile()` log shows the path it consults), so
@@ -227,7 +240,20 @@ struct AneModel {
     /* Public-facing view (filled with name/shape pointers into OwnedSpec). */
     AneTensorSpec* input_view;
     AneTensorSpec* output_view;
+
+    int32_t    num_procedures;
+    ProcSpecs* extra_procs;   /* length = num_procedures - 1 (procs 1..N) */
 };
+
+static void free_owned_specs(OwnedSpec* specs, int32_t n);
+
+static void free_proc_specs(ProcSpecs* p) {
+    if (!p) return;
+    free_owned_specs(p->input_specs,  p->num_inputs);
+    free_owned_specs(p->output_specs, p->num_outputs);
+    free(p->input_view);
+    free(p->output_view);
+}
 
 static void free_owned_specs(OwnedSpec* specs, int32_t n) {
     if (!specs) return;
@@ -425,10 +451,37 @@ static AneStatus derive_specs_from_attrs_dict(id attrs_id, AneModel* m) {
     int32_t nout = (int32_t)lout.count;
     AneStatus s = build_specs_from_live_list(lin, nin, &m->input_specs, &m->input_view);
     if (s != ANE_OK) return s;
+    /* Record nin before attempting output build so cleanup can free the
+     * allocated input_specs if the output step fails. */
+    m->num_inputs  = nin;
     s = build_specs_from_live_list(lout, nout, &m->output_specs, &m->output_view);
     if (s != ANE_OK) return s;
-    m->num_inputs  = nin;
     m->num_outputs = nout;
+
+    int32_t n_extra = (int32_t)nsl.count - 1;
+    m->num_procedures = (int32_t)nsl.count;
+    if (n_extra > 0) {
+        m->extra_procs = (ProcSpecs*)calloc((size_t)n_extra, sizeof(ProcSpecs));
+        if (!m->extra_procs) return ANE_ERR_OOM;
+        for (int32_t i = 0; i < n_extra; i++) {
+            id pi = nsl[(NSUInteger)(i + 1)];
+            if (![pi isKindOfClass:[NSDictionary class]]) continue;
+            NSDictionary* pd = (NSDictionary*)pi;
+            id li  = pd[@"LiveInputList"];
+            id lo  = pd[@"LiveOutputList"];
+            if (![li isKindOfClass:[NSArray class]] || ![lo isKindOfClass:[NSArray class]]) continue;
+            int32_t pnin  = (int32_t)((NSArray*)li).count;
+            int32_t pnout = (int32_t)((NSArray*)lo).count;
+            AneStatus ps = build_specs_from_live_list((NSArray*)li, pnin,
+                &m->extra_procs[i].input_specs, &m->extra_procs[i].input_view);
+            if (ps != ANE_OK) return ps;
+            m->extra_procs[i].num_inputs = pnin;
+            ps = build_specs_from_live_list((NSArray*)lo, pnout,
+                &m->extra_procs[i].output_specs, &m->extra_procs[i].output_view);
+            if (ps != ANE_OK) return ps;
+            m->extra_procs[i].num_outputs = pnout;
+        }
+    }
     return ANE_OK;
 }
 
@@ -436,7 +489,7 @@ static AneStatus derive_specs_from_attrs_dict(id attrs_id, AneModel* m) {
  * populate the AneModel's spec arrays from it. This is the single
  * source of truth — `modelAttributes` is the framework's own view
  * of the model, so we cannot disagree with it. */
-static AneStatus derive_specs_from_attrs(id mdl, AneModel* m) {
+AneStatus derive_specs_from_attrs(id mdl, AneModel* m) {
     id attrs_id = ((id(*)(id, SEL))objc_msgSend)(mdl, sel_getUid("modelAttributes"));
     return derive_specs_from_attrs_dict(attrs_id, m);
 }
@@ -620,8 +673,13 @@ void ane_model_close(AneModel* m) {
              * Calling unload on a never-loaded model returns NO with an
              * NSError that we'd otherwise log as a misleading "model
              * unload failed" — exactly the kind of noise that masks a
-             * real failure during partial-open cleanup. */
-            if (m->loaded) {
+             * real failure during partial-open cleanup.
+             *
+             * Secondary instances share the `_ANEInMemoryModel*` with the
+             * primary; only the primary owns the unload. Skip unload AND
+             * the matching retain-balanced release here — the primary's
+             * close drops the final retain. */
+            if (m->loaded && !m->is_secondary_instance) {
                 NSError* e = nil;
                 BOOL ok = ((BOOL(*)(id, SEL, unsigned int, NSError**))objc_msgSend)(
                     m->in_memory_model, sel_getUid("unloadWithQoS:error:"),
@@ -633,7 +691,7 @@ void ane_model_close(AneModel* m) {
             }
             [m->in_memory_model release];
         }
-        if (m->descriptor) [m->descriptor release];
+        if (m->descriptor && !m->is_secondary_instance) [m->descriptor release];
         if (m->client) [m->client release];
         /* temp_dir/hex_id are only set on the cache-miss path; safe to
          * skip cleanly on warm starts. */
@@ -644,10 +702,16 @@ void ane_model_close(AneModel* m) {
         if (m->hex_id) [m->hex_id release];
         if (m->mil_data) [m->mil_data release];
         if (m->weights_data) [m->weights_data release];
+        if (m->extra_weights_data) [m->extra_weights_data release];
         free_owned_specs(m->input_specs, m->num_inputs);
         free_owned_specs(m->output_specs, m->num_outputs);
         free(m->input_view);
         free(m->output_view);
+        if (m->extra_procs) {
+            int32_t n_extra = m->num_procedures > 0 ? m->num_procedures - 1 : 0;
+            for (int32_t i = 0; i < n_extra; i++) free_proc_specs(&m->extra_procs[i]);
+            free(m->extra_procs);
+        }
         free(m);
     }
 }
@@ -711,6 +775,12 @@ struct AneRequest {
 
     AneCompletionFn  completion_fn;
     void*            completion_user;
+
+    int32_t          procedure_index;
+    AneBuffer*       weights_buf;
+    AnePerfStats*    perf_stats;
+    AneSharedEvents* shared_events;
+    uint64_t         transaction_handle;
 };
 
 AneStatus ane_request_create(AneModel* m, AneRequest** out) {
@@ -887,10 +957,25 @@ static id build_ane_request(AneRequest* r, AneStatus* status_out) {
         [iOut addObject:@(i)];
     }
 
-    id req = ((id(*)(Class, SEL, id, id, id, id, id, id, id))objc_msgSend)(
-        g_AneRequestCls,
-        sel_getUid("requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:"),
-        wIn, iIn, wOut, iOut, nil, nil, @0);
+    id weights_obj = (r->weights_buf && r->weights_buf->wrapper) ? r->weights_buf->wrapper : nil;
+    id perf_obj    = r->perf_stats    ? *(id*)r->perf_stats    : nil;
+    id events_obj  = r->shared_events ? *(id*)r->shared_events : nil;
+    NSNumber* proc_num = @(r->procedure_index);
+
+    SEL full_sel = sel_getUid("requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:sharedEvents:transactionHandle:");
+    id req = nil;
+    if ([g_AneRequestCls respondsToSelector:full_sel]) {
+        req = ((id(*)(Class, SEL, id, id, id, id, id, id, id, id, unsigned long))objc_msgSend)(
+            g_AneRequestCls, full_sel,
+            wIn, iIn, wOut, iOut,
+            weights_obj, perf_obj, proc_num, events_obj,
+            (unsigned long)r->transaction_handle);
+    } else {
+        req = ((id(*)(Class, SEL, id, id, id, id, id, id, id))objc_msgSend)(
+            g_AneRequestCls,
+            sel_getUid("requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:"),
+            wIn, iIn, wOut, iOut, weights_obj, perf_obj, proc_num);
+    }
     if (!req) {
         set_last_error("_ANERequest creation returned nil");
         *status_out = ANE_ERR_INTERNAL;
@@ -1396,4 +1481,1040 @@ const char* ane_request_last_error(const AneRequest* r) {
      * a torn read cannot dereference freed memory. */
     if (atomic_load((atomic_int*)&((AneRequest*)r)->has_result) == 0) return "";
     return r->last_err_msg;
+}
+
+/* ============================================================
+ * Extended API surface
+ * ============================================================ */
+
+#include <IOSurface/IOSurfaceRef.h>
+
+struct AnePerfStats    { id obj; };
+struct AneSharedEvents { id obj; NSMutableArray* signals; NSMutableArray* waits; };
+struct AneChain        { id obj; AneModel* model; id req_obj; atomic_int in_flight; AneStatus last_status; };
+
+AneStatus ane_device_info(AneDeviceInfo* out) {
+    if (!out) return ANE_ERR_INVALID_ARG;
+    if (!ane_private_load()) return ANE_ERR_UNSUPPORTED;
+    memset(out, 0, sizeof(*out));
+    if (!g_AneVirtualClientCls) return ANE_ERR_UNSUPPORTED;
+    @autoreleasepool {
+        id vc = nil;
+        SEL shared = sel_getUid("sharedConnection");
+        if ([g_AneVirtualClientCls respondsToSelector:shared]) {
+            vc = ((id(*)(Class, SEL))objc_msgSend)(g_AneVirtualClientCls, shared);
+        }
+        if (!vc) {
+            id alloced = ((id(*)(Class, SEL))objc_msgSend)(g_AneVirtualClientCls, sel_getUid("alloc"));
+            vc = ((id(*)(id, SEL))objc_msgSend)(alloced, sel_getUid("initWithSingletonAccess"));
+        }
+        if (!vc) return ANE_ERR_INTERNAL;
+        SEL has    = sel_getUid("hasANE");
+        SEL ncores = sel_getUid("numANECores");
+        SEL nanes  = sel_getUid("numANEs");
+        SEL board  = sel_getUid("aneBoardtype");
+        SEL arch   = sel_getUid("aneArchitectureTypeStr");
+        if ([vc respondsToSelector:has])
+            out->has_ane = ((BOOL(*)(id, SEL))objc_msgSend)(vc, has) ? true : false;
+        if ([vc respondsToSelector:ncores])
+            out->num_cores = (int32_t)((unsigned int(*)(id, SEL))objc_msgSend)(vc, ncores);
+        if ([vc respondsToSelector:nanes])
+            out->num_anes = (int32_t)((unsigned int(*)(id, SEL))objc_msgSend)(vc, nanes);
+        if ([vc respondsToSelector:board])
+            out->board_type = (int64_t)((long long(*)(id, SEL))objc_msgSend)(vc, board);
+        if ([vc respondsToSelector:arch]) {
+            id s = ((id(*)(id, SEL))objc_msgSend)(vc, arch);
+            if ([s isKindOfClass:[NSString class]]) {
+                const char* u = [(NSString*)s UTF8String];
+                if (u) strncpy(out->arch_type, u, sizeof(out->arch_type) - 1);
+            }
+        }
+    }
+    return ANE_OK;
+}
+
+int32_t ane_model_num_procedures(const AneModel* m) {
+    if (!m) return 0;
+    return m->num_procedures > 0 ? m->num_procedures : 1;
+}
+
+static const ProcSpecs* proc_at(const AneModel* m, int32_t p) {
+    if (!m || p < 0) return NULL;
+    if (p == 0) {
+        static __thread ProcSpecs tls;
+        tls.num_inputs   = m->num_inputs;
+        tls.num_outputs  = m->num_outputs;
+        tls.input_specs  = m->input_specs;
+        tls.output_specs = m->output_specs;
+        tls.input_view   = m->input_view;
+        tls.output_view  = m->output_view;
+        return &tls;
+    }
+    if (p - 1 >= (m->num_procedures > 0 ? m->num_procedures - 1 : 0)) return NULL;
+    return &m->extra_procs[p - 1];
+}
+
+int32_t ane_model_num_inputs_for_procedure(const AneModel* m, int32_t p) {
+    const ProcSpecs* ps = proc_at(m, p); return ps ? ps->num_inputs : 0;
+}
+int32_t ane_model_num_outputs_for_procedure(const AneModel* m, int32_t p) {
+    const ProcSpecs* ps = proc_at(m, p); return ps ? ps->num_outputs : 0;
+}
+const AneTensorSpec* ane_model_input_spec_for_procedure(const AneModel* m, int32_t p, int32_t i) {
+    const ProcSpecs* ps = proc_at(m, p);
+    if (!ps || i < 0 || i >= ps->num_inputs) return NULL;
+    return &ps->input_view[i];
+}
+const AneTensorSpec* ane_model_output_spec_for_procedure(const AneModel* m, int32_t p, int32_t i) {
+    const ProcSpecs* ps = proc_at(m, p);
+    if (!ps || i < 0 || i >= ps->num_outputs) return NULL;
+    return &ps->output_view[i];
+}
+size_t ane_model_input_nbytes_for_procedure(const AneModel* m, int32_t p, int32_t i) {
+    const ProcSpecs* ps = proc_at(m, p);
+    if (!ps || i < 0 || i >= ps->num_inputs) return 0;
+    return ps->input_specs[i].nbytes;
+}
+size_t ane_model_output_nbytes_for_procedure(const AneModel* m, int32_t p, int32_t i) {
+    const ProcSpecs* ps = proc_at(m, p);
+    if (!ps || i < 0 || i >= ps->num_outputs) return 0;
+    return ps->output_specs[i].nbytes;
+}
+
+int32_t ane_model_queue_depth(const AneModel* m) {
+    if (!m || !m->in_memory_model) return 0;
+    SEL s = sel_getUid("queueDepth");
+    if (![m->in_memory_model respondsToSelector:s]) return 0;
+    return (int32_t)((char(*)(id, SEL))objc_msgSend)(m->in_memory_model, s);
+}
+
+int64_t ane_model_in_flight(const AneModel* m) {
+    if (!m || !m->in_memory_model) return 0;
+    SEL pgm = sel_getUid("program");
+    if (![m->in_memory_model respondsToSelector:pgm]) return 0;
+    id program = ((id(*)(id, SEL))objc_msgSend)(m->in_memory_model, pgm);
+    if (!program) return 0;
+    SEL inf = sel_getUid("currentAsyncRequestsInFlight");
+    if (![program respondsToSelector:inf]) return 0;
+    return (int64_t)((long long(*)(id, SEL))objc_msgSend)(program, inf);
+}
+
+const char* ane_model_program_id(const AneModel* m) {
+    if (!m) return "";
+    if (m->hex_id) {
+        const char* s = [m->hex_id UTF8String];
+        return s ? s : "";
+    }
+    if (m->in_memory_model) {
+        SEL s = sel_getUid("hexStringIdentifier");
+        if ([m->in_memory_model respondsToSelector:s]) {
+            id h = ((id(*)(id, SEL))objc_msgSend)(m->in_memory_model, s);
+            if ([h isKindOfClass:[NSString class]]) {
+                const char* u = [(NSString*)h UTF8String];
+                return u ? u : "";
+            }
+        }
+    }
+    return "";
+}
+
+const char* ane_model_weights_hash(const AneModel* m) {
+    if (!m || !m->descriptor) return "";
+    SEL s = sel_getUid("weightsHash");
+    if (![m->descriptor respondsToSelector:s]) return "";
+    id h = ((id(*)(id, SEL))objc_msgSend)(m->descriptor, s);
+    if ([h isKindOfClass:[NSString class]]) {
+        const char* u = [(NSString*)h UTF8String];
+        return u ? u : "";
+    }
+    if ([h isKindOfClass:[NSData class]]) {
+        static __thread char buf[129];
+        const unsigned char* b = (const unsigned char*)[(NSData*)h bytes];
+        size_t n = [(NSData*)h length];
+        if (n > 64) n = 64;
+        for (size_t i = 0; i < n; i++) snprintf(buf + i*2, 3, "%02x", b[i]);
+        buf[n*2] = '\0';
+        return buf;
+    }
+    return "";
+}
+
+bool ane_model_program_handle(const AneModel* m, uint64_t* out) {
+    if (!m || !out || !m->in_memory_model) return false;
+    SEL s = sel_getUid("programHandle");
+    if (![m->in_memory_model respondsToSelector:s]) return false;
+    *out = (uint64_t)((unsigned long long(*)(id, SEL))objc_msgSend)(m->in_memory_model, s);
+    return true;
+}
+
+bool ane_model_intermediate_buffer_handle(const AneModel* m, uint64_t* out) {
+    if (!m || !out || !m->in_memory_model) return false;
+    SEL s = sel_getUid("intermediateBufferHandle");
+    if (![m->in_memory_model respondsToSelector:s]) return false;
+    *out = (uint64_t)((unsigned long long(*)(id, SEL))objc_msgSend)(m->in_memory_model, s);
+    return true;
+}
+
+bool ane_cache_exists_for_hash(const char* hex_hash) {
+    if (!hex_hash || !ane_private_load() || !g_AneClientCls) return false;
+    @autoreleasepool {
+        id client = ((id(*)(id, SEL, BOOL))objc_msgSend)(
+            [g_AneClientCls alloc], sel_getUid("initWithRestrictedAccessAllowed:"), YES);
+        if (!client) return false;
+        SEL s = sel_getUid("compiledModelExistsMatchingHash:");
+        BOOL r = NO;
+        if ([client respondsToSelector:s]) {
+            NSString* h = [NSString stringWithUTF8String:hex_hash];
+            r = ((BOOL(*)(id, SEL, id))objc_msgSend)(client, s, h);
+        }
+        [client release];
+        return r ? true : false;
+    }
+}
+
+AneStatus ane_cache_purge_for_hash(const char* hex_hash) {
+    if (!hex_hash || !ane_private_load() || !g_AneClientCls) return ANE_ERR_UNSUPPORTED;
+    @autoreleasepool {
+        id client = ((id(*)(id, SEL, BOOL))objc_msgSend)(
+            [g_AneClientCls alloc], sel_getUid("initWithRestrictedAccessAllowed:"), YES);
+        if (!client) return ANE_ERR_INTERNAL;
+        SEL s = sel_getUid("purgeCompiledModelMatchingHash:");
+        if ([client respondsToSelector:s]) {
+            NSString* h = [NSString stringWithUTF8String:hex_hash];
+            ((void(*)(id, SEL, id))objc_msgSend)(client, s, h);
+            [client release];
+            return ANE_OK;
+        }
+        [client release];
+        return ANE_ERR_UNSUPPORTED;
+    }
+}
+
+AneStatus ane_perf_stats_create(AnePerfStats** out) {
+    if (!out) return ANE_ERR_INVALID_ARG;
+    if (!ane_private_load() || !g_AnePerfStatsCls) return ANE_ERR_UNSUPPORTED;
+    AnePerfStats* ps = (AnePerfStats*)calloc(1, sizeof(AnePerfStats));
+    if (!ps) return ANE_ERR_OOM;
+    @autoreleasepool {
+        id o = ((id(*)(Class, SEL))objc_msgSend)(g_AnePerfStatsCls, sel_getUid("new"));
+        if (!o) { free(ps); return ANE_ERR_INTERNAL; }
+        ps->obj = [o retain];
+    }
+    *out = ps;
+    return ANE_OK;
+}
+
+void ane_perf_stats_release(AnePerfStats* ps) {
+    if (!ps) return;
+    if (ps->obj) [ps->obj release];
+    free(ps);
+}
+
+uint64_t ane_perf_stats_hw_execution_ns(const AnePerfStats* ps) {
+    if (!ps || !ps->obj) return 0;
+    SEL s = sel_getUid("hwExecutionTime");
+    if (![ps->obj respondsToSelector:s]) return 0;
+    return (uint64_t)((unsigned long long(*)(id, SEL))objc_msgSend)(ps->obj, s);
+}
+
+size_t ane_perf_stats_counters_nbytes(const AnePerfStats* ps) {
+    if (!ps || !ps->obj) return 0;
+    SEL s = sel_getUid("perfCounterData");
+    if (![ps->obj respondsToSelector:s]) return 0;
+    id d = ((id(*)(id, SEL))objc_msgSend)(ps->obj, s);
+    if (![d isKindOfClass:[NSData class]]) return 0;
+    return [(NSData*)d length];
+}
+
+size_t ane_perf_stats_counters_copy(const AnePerfStats* ps, void* out, size_t cap) {
+    if (!ps || !ps->obj || !out) return 0;
+    SEL s = sel_getUid("perfCounterData");
+    if (![ps->obj respondsToSelector:s]) return 0;
+    id d = ((id(*)(id, SEL))objc_msgSend)(ps->obj, s);
+    if (![d isKindOfClass:[NSData class]]) return 0;
+    NSData* nd = (NSData*)d;
+    size_t n = [nd length];
+    if (n > cap) n = cap;
+    memcpy(out, [nd bytes], n);
+    return n;
+}
+
+AneStatus ane_model_set_perf_stats_mask(AneModel* m, uint32_t mask) {
+    if (!m || !m->in_memory_model) return ANE_ERR_INVALID_ARG;
+    m->perf_stats_mask = mask;
+    SEL s = sel_getUid("setPerfStatsMask:");
+    if ([m->in_memory_model respondsToSelector:s]) {
+        ((void(*)(id, SEL, unsigned int))objc_msgSend)(m->in_memory_model, s, mask);
+    }
+    return ANE_OK;
+}
+
+uint32_t ane_model_get_perf_stats_mask(const AneModel* m) {
+    if (!m) return 0;
+    if (m->in_memory_model) {
+        SEL s = sel_getUid("perfStatsMask");
+        if ([m->in_memory_model respondsToSelector:s]) {
+            return (uint32_t)((unsigned int(*)(id, SEL))objc_msgSend)(m->in_memory_model, s);
+        }
+    }
+    return m->perf_stats_mask;
+}
+
+AneStatus ane_shared_events_create(AneSharedEvents** out) {
+    if (!out) return ANE_ERR_INVALID_ARG;
+    if (!ane_private_load() || !g_AneSharedEventsCls) return ANE_ERR_UNSUPPORTED;
+    AneSharedEvents* ev = (AneSharedEvents*)calloc(1, sizeof(AneSharedEvents));
+    if (!ev) return ANE_ERR_OOM;
+    @autoreleasepool {
+        ev->signals = [[NSMutableArray alloc] init];
+        ev->waits   = [[NSMutableArray alloc] init];
+        SEL s = sel_getUid("sharedEventsWithSignalEvents:waitEvents:");
+        id o = nil;
+        if ([g_AneSharedEventsCls respondsToSelector:s]) {
+            o = ((id(*)(Class, SEL, id, id))objc_msgSend)(
+                g_AneSharedEventsCls, s, ev->signals, ev->waits);
+        } else {
+            o = ((id(*)(Class, SEL))objc_msgSend)(g_AneSharedEventsCls, sel_getUid("new"));
+        }
+        if (!o) {
+            [ev->signals release]; [ev->waits release]; free(ev);
+            return ANE_ERR_INTERNAL;
+        }
+        ev->obj = [o retain];
+    }
+    *out = ev;
+    return ANE_OK;
+}
+
+void ane_shared_events_release(AneSharedEvents* ev) {
+    if (!ev) return;
+    if (ev->obj)     [ev->obj release];
+    if (ev->signals) [ev->signals release];
+    if (ev->waits)   [ev->waits release];
+    free(ev);
+}
+
+AneStatus ane_shared_events_add_signal(AneSharedEvents* ev,
+                                       uint64_t value, uint32_t symbol_index,
+                                       AneEventType event_type,
+                                       void* mtl_shared_event, uint64_t agent_mask) {
+    if (!ev || !g_AneSharedSignalEventCls) return ANE_ERR_INVALID_ARG;
+    @autoreleasepool {
+        SEL s = sel_getUid("signalEventWithValue:symbolIndex:eventType:sharedEvent:");
+        id obj = ((id(*)(Class, SEL, unsigned long long, unsigned int, long long, id))objc_msgSend)(
+            g_AneSharedSignalEventCls, s,
+            (unsigned long long)value, (unsigned int)symbol_index,
+            (long long)event_type, (id)mtl_shared_event);
+        if (!obj) return ANE_ERR_INTERNAL;
+        if (agent_mask) {
+            SEL am = sel_getUid("setAgentMask:");
+            if ([obj respondsToSelector:am])
+                ((void(*)(id, SEL, unsigned long long))objc_msgSend)(obj, am, (unsigned long long)agent_mask);
+        }
+        [ev->signals addObject:obj];
+        SEL setter = sel_getUid("setSignalEvents:");
+        if (ev->obj && [ev->obj respondsToSelector:setter])
+            ((void(*)(id, SEL, id))objc_msgSend)(ev->obj, setter, ev->signals);
+    }
+    return ANE_OK;
+}
+
+AneStatus ane_shared_events_add_wait(AneSharedEvents* ev,
+                                     uint64_t value, void* mtl_shared_event,
+                                     AneEventType event_type) {
+    if (!ev || !g_AneSharedWaitEventCls) return ANE_ERR_INVALID_ARG;
+    @autoreleasepool {
+        SEL s = sel_getUid("waitEventWithValue:sharedEvent:eventType:");
+        id obj = nil;
+        if ([g_AneSharedWaitEventCls respondsToSelector:s]) {
+            obj = ((id(*)(Class, SEL, unsigned long long, id, unsigned long long))objc_msgSend)(
+                g_AneSharedWaitEventCls, s,
+                (unsigned long long)value, (id)mtl_shared_event, (unsigned long long)event_type);
+        } else {
+            SEL s2 = sel_getUid("waitEventWithValue:sharedEvent:");
+            obj = ((id(*)(Class, SEL, unsigned long long, id))objc_msgSend)(
+                g_AneSharedWaitEventCls, s2,
+                (unsigned long long)value, (id)mtl_shared_event);
+        }
+        if (!obj) return ANE_ERR_INTERNAL;
+        [ev->waits addObject:obj];
+        SEL setter = sel_getUid("setWaitEvents:");
+        if (ev->obj && [ev->obj respondsToSelector:setter])
+            ((void(*)(id, SEL, id))objc_msgSend)(ev->obj, setter, ev->waits);
+    }
+    return ANE_OK;
+}
+
+int32_t ane_shared_events_num_signals(const AneSharedEvents* ev) {
+    return (ev && ev->signals) ? (int32_t)[ev->signals count] : 0;
+}
+int32_t ane_shared_events_num_waits(const AneSharedEvents* ev) {
+    return (ev && ev->waits) ? (int32_t)[ev->waits count] : 0;
+}
+
+/* The setters below mutate `AneRequest` fields that `build_ane_request`
+ * reads on the submit/run path. Rejecting writes while in_flight is what
+ * stops a C-side caller from racing with the worker thread (the Rust
+ * wrapper takes `&mut self`, so this is purely defense for C callers). */
+#define ANE_REQUEST_SETTER_GUARD(req) \
+    do { \
+        if (!(req)) return ANE_ERR_INVALID_ARG; \
+        if (atomic_load(&(req)->in_flight) != 0) return ANE_ERR_BUSY; \
+    } while (0)
+
+AneStatus ane_request_set_weights(AneRequest* req, AneBuffer* weights) {
+    ANE_REQUEST_SETTER_GUARD(req);
+    req->weights_buf = weights;
+    return ANE_OK;
+}
+AneStatus ane_request_set_procedure_index(AneRequest* req, int32_t proc_idx) {
+    if (proc_idx < 0) return ANE_ERR_INVALID_ARG;
+    ANE_REQUEST_SETTER_GUARD(req);
+    req->procedure_index = proc_idx;
+    return ANE_OK;
+}
+AneStatus ane_request_set_perf_stats(AneRequest* req, AnePerfStats* ps) {
+    ANE_REQUEST_SETTER_GUARD(req);
+    req->perf_stats = ps;
+    return ANE_OK;
+}
+AneStatus ane_request_set_shared_events(AneRequest* req, AneSharedEvents* ev) {
+    ANE_REQUEST_SETTER_GUARD(req);
+    req->shared_events = ev;
+    return ANE_OK;
+}
+AneStatus ane_request_set_transaction(AneRequest* req, uint64_t handle) {
+    ANE_REQUEST_SETTER_GUARD(req);
+    req->transaction_handle = handle;
+    return ANE_OK;
+}
+int32_t  ane_request_procedure_index(const AneRequest* req) { return req ? req->procedure_index : 0; }
+uint64_t ane_request_transaction    (const AneRequest* req) { return req ? req->transaction_handle : 0; }
+
+void* ane_buffer_iosurface_ref(const AneBuffer* buf) { return buf ? (void*)buf->surface : NULL; }
+
+AneStatus ane_buffer_adopt_iosurface(void* iosurface_ref, size_t nbytes, AneBuffer** out) {
+    if (!iosurface_ref || !out) return ANE_ERR_INVALID_ARG;
+    if (!ane_private_load() || !g_AneIOSurfaceCls) return ANE_ERR_UNSUPPORTED;
+    AneBuffer* b = (AneBuffer*)calloc(1, sizeof(AneBuffer));
+    if (!b) return ANE_ERR_OOM;
+    IOSurfaceRef s = (IOSurfaceRef)iosurface_ref;
+    CFRetain(s);
+    b->surface = s;
+    b->nbytes  = nbytes;
+    @autoreleasepool {
+        id wrap = ((id(*)(Class, SEL, IOSurfaceRef))objc_msgSend)(
+            g_AneIOSurfaceCls, sel_getUid("objectWithIOSurface:"), s);
+        if (!wrap) { CFRelease(s); free(b); return ANE_ERR_INTERNAL; }
+        b->wrapper = [wrap retain];
+    }
+    *out = b;
+    return ANE_OK;
+}
+
+static NSDictionary* build_weights_dict(const AneWeightEntry* w, int32_t n, NSMutableArray* keepalive) {
+    NSMutableDictionary* d = [NSMutableDictionary dictionary];
+    for (int32_t i = 0; i < n; i++) {
+        if (!w[i].name) continue;
+        NSData* blob = nil;
+        if (w[i].path) {
+            blob = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:w[i].path]];
+        } else if (w[i].bytes && w[i].nbytes > 0) {
+            blob = [NSData dataWithBytes:w[i].bytes length:w[i].nbytes];
+        }
+        if (!blob) return nil;
+        [keepalive addObject:blob];
+        NSString* key = [NSString stringWithUTF8String:w[i].name];
+        d[key] = @{@"offset": @0, @"data": blob};
+    }
+    return d;
+}
+
+AneStatus ane_model_open_ex(const AneModelOpenOptionsEx* opts, AneModel** out_model) {
+    if (!opts || !out_model) return ANE_ERR_INVALID_ARG;
+    if (!opts->mil_path && (!opts->mil_bytes || opts->mil_nbytes == 0)) return ANE_ERR_INVALID_ARG;
+    if (!ane_private_load()) return ANE_ERR_UNSUPPORTED;
+
+    @autoreleasepool {
+        NSData* mil = opts->mil_path
+            ? [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:opts->mil_path]]
+            : [NSData dataWithBytes:opts->mil_bytes length:opts->mil_nbytes];
+        if (!mil) return ANE_ERR_IO;
+
+        AneModel* m = (AneModel*)calloc(1, sizeof(AneModel));
+        if (!m) return ANE_ERR_OOM;
+        m->mil_data = [mil retain];
+        m->compile_qos = opts->compile_qos ? opts->compile_qos : ANE_QOS_DEFAULT;
+        m->extra_weights_data = [[NSMutableArray alloc] init];
+
+        NSDictionary* wdict = nil;
+        if (opts->n_weights > 0 && opts->weights) {
+            wdict = build_weights_dict(opts->weights, opts->n_weights, m->extra_weights_data);
+            if (!wdict) { ane_model_close(m); return ANE_ERR_IO; }
+        } else {
+            wdict = @{};
+        }
+        if (opts->n_weights > 0 && wdict.count > 0) {
+            id first_key = wdict.allKeys.firstObject;
+            NSDictionary* first = first_key ? wdict[first_key] : nil;
+            id data = first ? first[@"data"] : nil;
+            if ([data isKindOfClass:[NSData class]]) m->weights_data = [data retain];
+        }
+
+        id descriptor = nil;
+        SEL ctor = sel_getUid("modelWithMILText:weights:optionsPlist:");
+        descriptor = ((id(*)(Class, SEL, id, id, id))objc_msgSend)(
+            g_AneDescriptorCls, ctor, mil, wdict, nil);
+        if (!descriptor && !opts->is_mil_model) {
+            SEL alt = sel_getUid("modelWithNetworkDescription:weights:optionsPlist:");
+            if ([g_AneDescriptorCls respondsToSelector:alt]) {
+                descriptor = ((id(*)(Class, SEL, id, id, id))objc_msgSend)(
+                    g_AneDescriptorCls, alt, mil, wdict, nil);
+            }
+        }
+        if (!descriptor) { ane_model_close(m); return ANE_ERR_COMPILE; }
+        m->descriptor = [descriptor retain];
+
+        m->in_memory_model = ((id(*)(Class, SEL, id))objc_msgSend)(
+            g_AneInMemoryCls, sel_getUid("inMemoryModelWithDescriptor:"), m->descriptor);
+        if (!m->in_memory_model) { ane_model_close(m); return ANE_ERR_COMPILE; }
+        [m->in_memory_model retain];
+
+        NSError* e = nil;
+        BOOL cache_hit = NO;
+        SEL exists_sel = sel_getUid("compiledModelExists");
+        if ([m->in_memory_model respondsToSelector:exists_sel])
+            cache_hit = ((BOOL(*)(id, SEL))objc_msgSend)(m->in_memory_model, exists_sel);
+        m->cache_hit = cache_hit ? true : false;
+
+        if (!cache_hit) {
+            id hxid = ((id(*)(id, SEL))objc_msgSend)(
+                m->in_memory_model, sel_getUid("hexStringIdentifier"));
+            m->hex_id = [hxid retain];
+            m->temp_dir = [[NSTemporaryDirectory()
+                stringByAppendingPathComponent:m->hex_id] retain];
+            NSFileManager* fm = [NSFileManager defaultManager];
+            [fm createDirectoryAtPath:[m->temp_dir stringByAppendingPathComponent:@"weights"]
+                  withIntermediateDirectories:YES attributes:nil error:nil];
+            [mil writeToFile:[m->temp_dir stringByAppendingPathComponent:@"model.mil"]
+                  atomically:YES];
+            for (NSString* key in [wdict allKeys]) {
+                NSDictionary* sub = wdict[key];
+                NSData* data = sub[@"data"];
+                NSString* leaf = [[key componentsSeparatedByString:@"/"] lastObject];
+                if (!leaf || ![data isKindOfClass:[NSData class]]) continue;
+                NSString* path = [m->temp_dir stringByAppendingPathComponent:
+                    [@"weights" stringByAppendingPathComponent:leaf]];
+                [data writeToFile:path atomically:YES];
+            }
+            BOOL ok = ((BOOL(*)(id, SEL, unsigned int, id, NSError**))objc_msgSend)(
+                m->in_memory_model, sel_getUid("compileWithQoS:options:error:"),
+                (unsigned int)m->compile_qos, @{}, &e);
+            if (!ok) { ane_model_close(m); return ANE_ERR_COMPILE; }
+        }
+
+        BOOL ok = ((BOOL(*)(id, SEL, unsigned int, id, NSError**))objc_msgSend)(
+            m->in_memory_model, sel_getUid("loadWithQoS:options:error:"),
+            (unsigned int)m->compile_qos, @{}, &e);
+        if (!ok) { ane_model_close(m); return ANE_ERR_LOAD; }
+        m->loaded = true;
+
+        AneStatus dst = derive_specs_from_attrs(m->in_memory_model, m);
+        if (dst != ANE_OK) { ane_model_close(m); return dst; }
+
+        m->client = ((id(*)(id, SEL, BOOL))objc_msgSend)(
+            [g_AneClientCls alloc], sel_getUid("initWithRestrictedAccessAllowed:"), YES);
+        if (!m->client) { ane_model_close(m); return ANE_ERR_INTERNAL; }
+
+        *out_model = m;
+        return ANE_OK;
+    }
+}
+
+AneStatus ane_model_open_file(const AneModelFileOpenOptions* opts, AneModel** out_model) {
+    if (!opts || !out_model || !opts->model_url) return ANE_ERR_INVALID_ARG;
+    if (!ane_private_load() || !g_AneModelCls) return ANE_ERR_UNSUPPORTED;
+
+    @autoreleasepool {
+        NSString* p = [NSString stringWithUTF8String:opts->model_url];
+        NSURL* url = [p hasPrefix:@"file:"]
+            ? [NSURL URLWithString:p]
+            : [NSURL fileURLWithPath:p];
+        NSString* key = opts->cache_key
+            ? [NSString stringWithUTF8String:opts->cache_key]
+            : @"default";
+        id mdl = nil;
+        if (opts->cache_url_identifier) {
+            NSString* ci = [NSString stringWithUTF8String:opts->cache_url_identifier];
+            SEL s = sel_getUid("modelAtURLWithCacheURLIdentifier:key:cacheURLIdentifier:");
+            if ([g_AneModelCls respondsToSelector:s])
+                mdl = ((id(*)(Class, SEL, id, id, id))objc_msgSend)(g_AneModelCls, s, url, key, ci);
+        }
+        if (!mdl) {
+            mdl = ((id(*)(Class, SEL, id, id))objc_msgSend)(
+                g_AneModelCls, sel_getUid("modelAtURL:key:"), url, key);
+        }
+        if (!mdl) return ANE_ERR_LOAD;
+
+        AneModel* m = (AneModel*)calloc(1, sizeof(AneModel));
+        if (!m) return ANE_ERR_OOM;
+        m->in_memory_model = [mdl retain];
+        m->compile_qos = opts->compile_qos ? opts->compile_qos : ANE_QOS_DEFAULT;
+
+        NSError* e = nil;
+        id client = ((id(*)(id, SEL, BOOL))objc_msgSend)(
+            [g_AneClientCls alloc], sel_getUid("initWithRestrictedAccessAllowed:"), YES);
+        if (!client) { ane_model_close(m); return ANE_ERR_INTERNAL; }
+        BOOL ok = ((BOOL(*)(id, SEL, id, id, unsigned int, NSError**))objc_msgSend)(
+            client, sel_getUid("loadModel:options:qos:error:"),
+            m->in_memory_model, @{}, (unsigned int)m->compile_qos, &e);
+        if (!ok) { [client release]; ane_model_close(m); return ANE_ERR_LOAD; }
+        m->loaded = true;
+        m->client = client;
+
+        AneStatus dst = derive_specs_from_attrs(m->in_memory_model, m);
+        if (dst != ANE_OK) { ane_model_close(m); return dst; }
+
+        *out_model = m;
+        return ANE_OK;
+    }
+}
+
+AneStatus ane_model_open_realtime(const AneModelOpenOptions* opts, AneModel** out_model) {
+    AneStatus s = ane_model_open(opts, out_model);
+    if (s != ANE_OK) return s;
+    (*out_model)->is_realtime = true;
+    return ANE_OK;
+}
+AneStatus ane_model_open_realtime_ex(const AneModelOpenOptionsEx* opts, AneModel** out_model) {
+    AneStatus s = ane_model_open_ex(opts, out_model);
+    if (s != ANE_OK) return s;
+    (*out_model)->is_realtime = true;
+    return ANE_OK;
+}
+
+AneStatus ane_realtime_task_begin(void) {
+    if (!ane_private_load() || !g_AneVirtualClientCls) return ANE_ERR_UNSUPPORTED;
+    @autoreleasepool {
+        id vc = ((id(*)(Class, SEL))objc_msgSend)(g_AneVirtualClientCls, sel_getUid("sharedConnection"));
+        if (!vc) return ANE_ERR_INTERNAL;
+        SEL s = sel_getUid("beginRealTimeTask");
+        if (![vc respondsToSelector:s]) return ANE_ERR_UNSUPPORTED;
+        BOOL ok = ((BOOL(*)(id, SEL))objc_msgSend)(vc, s);
+        return ok ? ANE_OK : ANE_ERR_INTERNAL;
+    }
+}
+AneStatus ane_realtime_task_end(void) {
+    if (!ane_private_load() || !g_AneVirtualClientCls) return ANE_ERR_UNSUPPORTED;
+    @autoreleasepool {
+        id vc = ((id(*)(Class, SEL))objc_msgSend)(g_AneVirtualClientCls, sel_getUid("sharedConnection"));
+        if (!vc) return ANE_ERR_INTERNAL;
+        SEL s = sel_getUid("endRealTimeTask");
+        if (![vc respondsToSelector:s]) return ANE_ERR_UNSUPPORTED;
+        BOOL ok = ((BOOL(*)(id, SEL))objc_msgSend)(vc, s);
+        return ok ? ANE_OK : ANE_ERR_INTERNAL;
+    }
+}
+
+AneStatus ane_chain_create(const AneChainStep* steps, int32_t n_steps, AneChain** out) {
+    if (!steps || n_steps <= 0 || !out) return ANE_ERR_INVALID_ARG;
+    if (!ane_private_load() || !g_AneChainingRequestCls) return ANE_ERR_UNSUPPORTED;
+    /* Every step must share the same model — the chain dispatch goes
+     * through a single `_ANEClient.doEnqueueSetsWithModel:`, so mixing
+     * models would silently drop all but the first model's stages. */
+    if (!steps[0].request) return ANE_ERR_INVALID_ARG;
+    AneModel* anchor = steps[0].request->model;
+    for (int32_t i = 1; i < n_steps; i++) {
+        if (!steps[i].request) return ANE_ERR_INVALID_ARG;
+        if (steps[i].request->model != anchor) return ANE_ERR_INVALID_ARG;
+    }
+    AneChain* c = (AneChain*)calloc(1, sizeof(AneChain));
+    if (!c) return ANE_ERR_OOM;
+    c->model = anchor;
+    atomic_init(&c->in_flight, 0);
+
+    @autoreleasepool {
+        NSMutableArray* arr = [NSMutableArray array];
+        for (int32_t i = 0; i < n_steps; i++) {
+            AneRequest* rq = steps[i].request;
+            NSMutableArray* wIn  = [NSMutableArray array];
+            NSMutableArray* wOut = [NSMutableArray array];
+            for (int32_t k = 0; k < rq->model->num_inputs; k++)
+                if (rq->input_bound[k]) [wIn addObject:rq->input_bound[k]->wrapper];
+            for (int32_t k = 0; k < rq->model->num_outputs; k++)
+                if (rq->output_bound[k]) [wOut addObject:rq->output_bound[k]->wrapper];
+            id signals = (rq->shared_events && rq->shared_events->obj) ? rq->shared_events->obj : nil;
+            SEL s = sel_getUid("chainingRequestWithInputs:outputSets:lbInputSymbolId:lbOutputSymbolId:procedureIndex:signalEvents:transactionHandle:fwEnqueueDelay:memoryPoolId:");
+            id step = ((id(*)(Class, SEL, id, id, long long, long long, id, id, unsigned long long, unsigned long long, unsigned long long))objc_msgSend)(
+                g_AneChainingRequestCls, s,
+                wIn, wOut,
+                (long long)steps[i].lb_input_symbol_id,
+                (long long)steps[i].lb_output_symbol_id,
+                @(rq->procedure_index),
+                signals,
+                (unsigned long long)rq->transaction_handle,
+                (unsigned long long)steps[i].fw_enqueue_delay,
+                (unsigned long long)steps[i].memory_pool_id);
+            if (!step) { free(c); return ANE_ERR_INTERNAL; }
+            [arr addObject:step];
+        }
+        c->req_obj = [arr retain];
+    }
+    *out = c;
+    return ANE_OK;
+}
+
+AneStatus ane_chain_prepare(AneChain* chain, AneQoS qos) {
+    if (!chain || !chain->model || !chain->model->client) return ANE_ERR_INVALID_ARG;
+    @autoreleasepool {
+        NSError* e = nil;
+        id first = [(NSArray*)chain->req_obj firstObject];
+        if (!first) return ANE_ERR_INVALID_ARG;
+        SEL s = sel_getUid("doPrepareChainingWithModel:options:chainingReq:qos:error:");
+        if (![chain->model->client respondsToSelector:s]) return ANE_ERR_UNSUPPORTED;
+        BOOL ok = ((BOOL(*)(id, SEL, id, id, id, unsigned int, NSError**))objc_msgSend)(
+            chain->model->client, s,
+            chain->model->in_memory_model, @{}, first,
+            (unsigned int)(qos ? qos : ANE_QOS_DEFAULT), &e);
+        return ok ? ANE_OK : ANE_ERR_EVAL;
+    }
+}
+
+AneStatus ane_chain_enqueue(AneChain* chain, AneQoS qos) {
+    if (!chain || !chain->model || !chain->model->client) return ANE_ERR_INVALID_ARG;
+    int expected = 0;
+    if (!atomic_compare_exchange_strong(&chain->in_flight, &expected, 1)) return ANE_ERR_BUSY;
+    @autoreleasepool {
+        NSError* e = nil;
+        SEL s = sel_getUid("doEnqueueSetsWithModel:outputSet:options:qos:error:");
+        if (![chain->model->client respondsToSelector:s]) {
+            atomic_store(&chain->in_flight, 0);
+            return ANE_ERR_UNSUPPORTED;
+        }
+        BOOL ok = ((BOOL(*)(id, SEL, id, id, id, unsigned int, NSError**))objc_msgSend)(
+            chain->model->client, s,
+            chain->model->in_memory_model, chain->req_obj, @{},
+            (unsigned int)(qos ? qos : ANE_QOS_DEFAULT), &e);
+        chain->last_status = ok ? ANE_OK : ANE_ERR_EVAL;
+        atomic_store(&chain->in_flight, 0);
+        return chain->last_status;
+    }
+}
+
+/* `doEnqueueSetsWithModel:` is synchronous, so enqueue already blocks
+ * until the chain completes. `wait` exists for API symmetry with
+ * `ane_request_wait` and just returns the last enqueue's status.
+ * `timeout_ms` is ignored. */
+AneStatus ane_chain_wait(AneChain* chain, int32_t timeout_ms) {
+    (void)timeout_ms;
+    if (!chain) return ANE_ERR_INVALID_ARG;
+    return chain->last_status;
+}
+
+void ane_chain_release(AneChain* chain) {
+    if (!chain) return;
+    if (chain->req_obj) [chain->req_obj release];
+    free(chain);
+}
+
+struct AneSessionHint { AneSessionHintKind kind; };
+
+static const char* ns_string_or_empty(NSString* s) {
+    if (![s isKindOfClass:[NSString class]]) return "";
+    const char* u = [s UTF8String];
+    return u ? u : "";
+}
+
+const char* ane_model_uuid(const AneModel* m) {
+    if (!m || !m->in_memory_model) return "";
+    SEL s = sel_getUid("UUID");
+    if (![m->in_memory_model respondsToSelector:s]) return "";
+    id u = ((id(*)(id, SEL))objc_msgSend)(m->in_memory_model, s);
+    if ([u isKindOfClass:[NSUUID class]]) {
+        return ns_string_or_empty([(NSUUID*)u UUIDString]);
+    }
+    return ns_string_or_empty(u);
+}
+
+const char* ane_model_source_url(const AneModel* m) {
+    if (!m || !m->in_memory_model) return "";
+    SEL s = sel_getUid("sourceURL");
+    if (![m->in_memory_model respondsToSelector:s]) return "";
+    id u = ((id(*)(id, SEL))objc_msgSend)(m->in_memory_model, s);
+    if ([u isKindOfClass:[NSURL class]]) return ns_string_or_empty([(NSURL*)u absoluteString]);
+    return ns_string_or_empty(u);
+}
+
+const char* ane_model_model_url(const AneModel* m) {
+    if (!m || !m->in_memory_model) return "";
+    SEL s = sel_getUid("modelURL");
+    if (![m->in_memory_model respondsToSelector:s]) return "";
+    id u = ((id(*)(id, SEL))objc_msgSend)(m->in_memory_model, s);
+    if ([u isKindOfClass:[NSURL class]]) return ns_string_or_empty([(NSURL*)u absoluteString]);
+    return ns_string_or_empty(u);
+}
+
+const char* ane_model_key(const AneModel* m) {
+    if (!m || !m->in_memory_model) return "";
+    SEL s = sel_getUid("key");
+    if (![m->in_memory_model respondsToSelector:s]) return "";
+    return ns_string_or_empty(((id(*)(id, SEL))objc_msgSend)(m->in_memory_model, s));
+}
+
+const char* ane_model_cache_url_identifier(const AneModel* m) {
+    if (!m || !m->in_memory_model) return "";
+    SEL s = sel_getUid("cacheURLIdentifier");
+    if (![m->in_memory_model respondsToSelector:s]) return "";
+    return ns_string_or_empty(((id(*)(id, SEL))objc_msgSend)(m->in_memory_model, s));
+}
+
+int64_t ane_model_identifier_source(const AneModel* m) {
+    if (!m || !m->in_memory_model) return 0;
+    SEL s = sel_getUid("identifierSource");
+    if (![m->in_memory_model respondsToSelector:s]) return 0;
+    return (int64_t)((long long(*)(id, SEL))objc_msgSend)(m->in_memory_model, s);
+}
+
+AneStatus ane_model_reset_on_unload(AneModel* m) {
+    if (!m || !m->in_memory_model) return ANE_ERR_INVALID_ARG;
+    SEL s = sel_getUid("resetOnUnload");
+    if (![m->in_memory_model respondsToSelector:s]) return ANE_ERR_UNSUPPORTED;
+    ((void(*)(id, SEL))objc_msgSend)(m->in_memory_model, s);
+    return ANE_OK;
+}
+
+AneStatus ane_model_unload(AneModel* m) {
+    if (!m || !m->in_memory_model || !m->loaded) return ANE_ERR_INVALID_ARG;
+    @autoreleasepool {
+        NSError* e = nil;
+        BOOL ok = ((BOOL(*)(id, SEL, unsigned int, NSError**))objc_msgSend)(
+            m->in_memory_model, sel_getUid("unloadWithQoS:error:"),
+            (unsigned int)(m->compile_qos ? m->compile_qos : ANE_QOS_DEFAULT), &e);
+        if (!ok) return ANE_ERR_INTERNAL;
+        m->loaded = false;
+        return ANE_OK;
+    }
+}
+
+AneStatus ane_model_new_instance(AneModel* src,
+                                 const AneModelInstanceParams* params,
+                                 AneQoS qos,
+                                 AneModel** out) {
+    if (!src || !src->client || !src->in_memory_model || !out) return ANE_ERR_INVALID_ARG;
+    @autoreleasepool {
+        NSError* e = nil;
+        SEL s = sel_getUid("loadModelNewInstance:options:modelInstParams:qos:error:");
+        if (![src->client respondsToSelector:s]) return ANE_ERR_UNSUPPORTED;
+        NSDictionary* inst_params = @{};
+        if (params && params->key) {
+            inst_params = @{ @"key": [NSString stringWithUTF8String:params->key] };
+        }
+        BOOL ok = ((BOOL(*)(id, SEL, id, id, id, unsigned int, NSError**))objc_msgSend)(
+            src->client, s,
+            src->in_memory_model, @{}, inst_params,
+            (unsigned int)(qos ? qos : ANE_QOS_DEFAULT), &e);
+        if (!ok) return ANE_ERR_LOAD;
+
+        AneModel* m = (AneModel*)calloc(1, sizeof(AneModel));
+        if (!m) return ANE_ERR_OOM;
+        m->in_memory_model        = [src->in_memory_model retain];
+        m->client                 = [src->client retain];
+        m->compile_qos            = qos ? qos : ANE_QOS_DEFAULT;
+        m->loaded                 = true;
+        m->is_secondary_instance  = true;
+        AneStatus dst = derive_specs_from_attrs(m->in_memory_model, m);
+        if (dst != ANE_OK) { ane_model_close(m); return dst; }
+        *out = m;
+        return ANE_OK;
+    }
+}
+
+int32_t ane_client_num_connections(void) {
+    if (!ane_private_load() || !g_AneClientCls) return 0;
+    @autoreleasepool {
+        id client = ((id(*)(id, SEL, BOOL))objc_msgSend)(
+            [g_AneClientCls alloc], sel_getUid("initWithRestrictedAccessAllowed:"), YES);
+        if (!client) return 0;
+        SEL s = sel_getUid("connectionsUsedForLoadingModels");
+        int32_t n = 0;
+        if ([client respondsToSelector:s]) {
+            id arr = ((id(*)(id, SEL))objc_msgSend)(client, s);
+            if ([arr isKindOfClass:[NSArray class]]) n = (int32_t)[(NSArray*)arr count];
+        }
+        [client release];
+        return n;
+    }
+}
+
+bool ane_model_is_virtual_client(const AneModel* m) {
+    if (!m || !m->client) return false;
+    SEL s = sel_getUid("isVirtualClient");
+    if (![m->client respondsToSelector:s]) return false;
+    return ((BOOL(*)(id, SEL))objc_msgSend)(m->client, s) ? true : false;
+}
+
+AneStatus ane_session_hint_create(AneSessionHintKind kind, AneSessionHint** out) {
+    if (!out) return ANE_ERR_INVALID_ARG;
+    AneSessionHint* h = (AneSessionHint*)calloc(1, sizeof(AneSessionHint));
+    if (!h) return ANE_ERR_OOM;
+    h->kind = kind;
+    *out = h;
+    return ANE_OK;
+}
+
+void ane_session_hint_release(AneSessionHint* h) { if (h) free(h); }
+
+AneStatus ane_model_apply_session_hint(AneModel* m, const AneSessionHint* h, char** out_report_json) {
+    if (!m || !m->client || !m->in_memory_model || !h) return ANE_ERR_INVALID_ARG;
+    if (out_report_json) *out_report_json = NULL;
+    @autoreleasepool {
+        SEL s = sel_getUid("sessionHintWithModel:hint:options:report:error:");
+        if (![m->client respondsToSelector:s]) return ANE_ERR_UNSUPPORTED;
+        NSError* e = nil;
+        NSNumber* hint_num = @((int)h->kind);
+        id report = nil;
+        BOOL ok = ((BOOL(*)(id, SEL, id, id, id, id*, NSError**))objc_msgSend)(
+            m->client, s,
+            m->in_memory_model, hint_num, @{}, &report, &e);
+        if (!ok) return ANE_ERR_INTERNAL;
+        if (out_report_json && report) {
+            NSError* je = nil;
+            NSData* json = [NSJSONSerialization
+                dataWithJSONObject:report
+                           options:0
+                             error:&je];
+            if (json) {
+                size_t n = [json length];
+                char* buf = (char*)malloc(n + 1);
+                if (buf) {
+                    memcpy(buf, [json bytes], n);
+                    buf[n] = '\0';
+                    *out_report_json = buf;
+                }
+            }
+        }
+        return ANE_OK;
+    }
+}
+
+AneStatus ane_model_open_file_ex(const AneModelFileOpenOptionsEx* opts, AneModel** out_model) {
+    if (!opts || !out_model || !opts->base.model_url) return ANE_ERR_INVALID_ARG;
+    if (!ane_private_load() || !g_AneModelCls) return ANE_ERR_UNSUPPORTED;
+
+    @autoreleasepool {
+        NSString* p = [NSString stringWithUTF8String:opts->base.model_url];
+        NSURL* url = [p hasPrefix:@"file:"] ? [NSURL URLWithString:p] : [NSURL fileURLWithPath:p];
+        NSString* key = opts->base.cache_key
+            ? [NSString stringWithUTF8String:opts->base.cache_key]
+            : @"default";
+
+        id mdl = nil;
+        if (opts->mps_constants_id) {
+            SEL s = sel_getUid("modelAtURL:key:mpsConstants:");
+            if ([g_AneModelCls respondsToSelector:s]) {
+                mdl = ((id(*)(Class, SEL, id, id, id))objc_msgSend)(
+                    g_AneModelCls, s, url, key, (id)opts->mps_constants_id);
+            }
+        }
+        if (!mdl && opts->model_attributes_id) {
+            SEL s = sel_getUid("modelAtURL:key:modelAttributes:");
+            if ([g_AneModelCls respondsToSelector:s]) {
+                mdl = ((id(*)(Class, SEL, id, id, id))objc_msgSend)(
+                    g_AneModelCls, s, url, key, (id)opts->model_attributes_id);
+            }
+        }
+        if (!mdl) {
+            mdl = ((id(*)(Class, SEL, id, id))objc_msgSend)(
+                g_AneModelCls, sel_getUid("modelAtURL:key:"), url, key);
+        }
+        if (!mdl) return ANE_ERR_LOAD;
+
+        AneModel* m = (AneModel*)calloc(1, sizeof(AneModel));
+        if (!m) return ANE_ERR_OOM;
+        m->in_memory_model = [mdl retain];
+        m->compile_qos = opts->base.compile_qos ? opts->base.compile_qos : ANE_QOS_DEFAULT;
+
+        NSError* e = nil;
+        id client = ((id(*)(id, SEL, BOOL))objc_msgSend)(
+            [g_AneClientCls alloc], sel_getUid("initWithRestrictedAccessAllowed:"), YES);
+        if (!client) { ane_model_close(m); return ANE_ERR_INTERNAL; }
+        BOOL ok = ((BOOL(*)(id, SEL, id, id, unsigned int, NSError**))objc_msgSend)(
+            client, sel_getUid("loadModel:options:qos:error:"),
+            m->in_memory_model, @{}, (unsigned int)m->compile_qos, &e);
+        if (!ok) { [client release]; ane_model_close(m); return ANE_ERR_LOAD; }
+        m->loaded = true;
+        m->client = client;
+
+        AneStatus dst = derive_specs_from_attrs(m->in_memory_model, m);
+        if (dst != ANE_OK) { ane_model_close(m); return dst; }
+
+        *out_model = m;
+        return ANE_OK;
+    }
+}
+
+const char* ane_perf_counter_name(int32_t counter_idx) {
+    if (!ane_private_load() || !g_AnePerfStatsCls) return "";
+    @autoreleasepool {
+        id ps = ((id(*)(Class, SEL))objc_msgSend)(g_AnePerfStatsCls, sel_getUid("new"));
+        if (!ps) return "";
+        SEL s = sel_getUid("stringForPerfCounter:");
+        const char* result = "";
+        if ([ps respondsToSelector:s]) {
+            id str = ((id(*)(id, SEL, int))objc_msgSend)(ps, s, (int)counter_idx);
+            if ([str isKindOfClass:[NSString class]]) {
+                static __thread char buf[256];
+                const char* u = [(NSString*)str UTF8String];
+                if (u) {
+                    strncpy(buf, u, sizeof(buf) - 1);
+                    buf[sizeof(buf) - 1] = '\0';
+                    result = buf;
+                }
+            }
+        }
+        [ps release];
+        return result;
+    }
+}
+
+AneStatus ane_perf_stats_emit_signpost(const AnePerfStats* ps, uint64_t model_string_id) {
+    if (!ps || !ps->obj) return ANE_ERR_INVALID_ARG;
+    SEL s = sel_getUid("emitPerfcounterSignpostsWithModelStringID:");
+    if (![ps->obj respondsToSelector:s]) return ANE_ERR_UNSUPPORTED;
+    ((void(*)(id, SEL, unsigned long long))objc_msgSend)(ps->obj, s, (unsigned long long)model_string_id);
+    return ANE_OK;
+}
+
+int32_t ane_request_num_perf_stats(const AneRequest* req) {
+    if (!req) return 0;
+    if (!req->perf_stats || !req->perf_stats->obj) return 0;
+    return 1;
+}
+
+AnePerfStats* ane_request_perf_stats_at(const AneRequest* req, int32_t idx) {
+    if (!req || idx != 0) return NULL;
+    return req->perf_stats;
+}
+
+AneStatus ane_decompress_weights(const void* compressed, size_t cn,
+                                 void** out_bytes, size_t* out_nbytes) {
+    if (!compressed || !out_bytes || !out_nbytes) return ANE_ERR_INVALID_ARG;
+    if (!ane_private_load() || !g_AneVirtualClientCls) return ANE_ERR_UNSUPPORTED;
+    @autoreleasepool {
+        id vc = ((id(*)(Class, SEL))objc_msgSend)(g_AneVirtualClientCls, sel_getUid("sharedConnection"));
+        if (!vc) return ANE_ERR_INTERNAL;
+        SEL s = sel_getUid("parallelDecompressedData:");
+        if (![vc respondsToSelector:s]) return ANE_ERR_UNSUPPORTED;
+        NSData* in = [NSData dataWithBytes:compressed length:cn];
+        id out = ((id(*)(id, SEL, id))objc_msgSend)(vc, s, in);
+        if (![out isKindOfClass:[NSData class]]) return ANE_ERR_INTERNAL;
+        NSData* od = (NSData*)out;
+        size_t n = [od length];
+        void* buf = malloc(n);
+        if (!buf) return ANE_ERR_OOM;
+        memcpy(buf, [od bytes], n);
+        *out_bytes = buf;
+        *out_nbytes = n;
+        return ANE_OK;
+    }
 }

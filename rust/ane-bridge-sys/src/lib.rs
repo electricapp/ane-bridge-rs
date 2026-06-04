@@ -143,6 +143,167 @@ pub enum AneModel {}
 pub enum AneBuffer {}
 /// Opaque request (one set of bindings + worker queue).
 pub enum AneRequest {}
+/// Opaque hardware-counters object populated by `_ANEPerformanceStats`.
+/// Pass to a [`AneRequest`] before submit; read counters back after wait.
+pub enum AnePerfStats {}
+/// Opaque container of signal + wait events for GPU↔ANE synchronization.
+/// Wraps `_ANESharedEvents`.
+pub enum AneSharedEvents {}
+/// Opaque pipeline that submits multiple linked models as one ANE dispatch.
+/// Wraps an `NSArray<_ANEChainingRequest*>`.
+pub enum AneChain {}
+
+/// Device-level facts about the ANE on this machine, returned by
+/// [`ane_device_info`]. Backed by `_ANEVirtualClient`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct AneDeviceInfo {
+    /// Number of ANE compute cores (e.g. 16 on M4 H16G).
+    pub num_cores: i32,
+    /// Number of ANE units (typically 1).
+    pub num_anes: i32,
+    /// True if the framework reports an ANE present on this device.
+    pub has_ane: bool,
+    /// Board type identifier (opaque).
+    pub board_type: i64,
+    /// Null-terminated UTF-8 architecture string (e.g. `"H16G"`).
+    pub arch_type: [c_char; 32],
+}
+
+/// One named weight blob for the multi-blob open path.
+/// Exactly one of (`path`) or (`bytes`, `nbytes`) must be set.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct AneWeightEntry {
+    /// Dictionary key the MIL references this blob by. Required.
+    pub name: *const c_char,
+    /// File path to read the blob from, or null if `bytes` is set.
+    pub path: *const c_char,
+    /// In-memory blob, or null if `path` is set.
+    pub bytes: *const c_void,
+    /// Length of `bytes`. Ignored when `path` is set.
+    pub nbytes: usize,
+}
+
+/// Extended open options: in-memory MIL text + `NSDictionary` weights.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct AneModelOpenOptionsEx {
+    /// Path to a MIL text file, or null when `mil_bytes` is supplied.
+    pub mil_path: *const c_char,
+    /// In-memory MIL text, or null when `mil_path` is supplied.
+    pub mil_bytes: *const c_void,
+    /// Byte count for `mil_bytes`; ignored if `mil_path` is set.
+    pub mil_nbytes: usize,
+    /// Pointer to an array of `n_weights` named blob descriptors.
+    pub weights: *const AneWeightEntry,
+    /// Length of the `weights` array (0 means weight-less).
+    pub n_weights: i32,
+    /// `QoS` for compile + load.
+    pub compile_qos: AneQoS,
+    /// When false the bytes are treated as a `NetworkDescription`
+    /// (non-MIL legacy input format).
+    pub is_mil_model: bool,
+    /// Optional options-plist JSON; null for none.
+    pub options_plist_json: *const c_char,
+}
+
+/// Selects how `_ANEModel` derives the cache identity for a file-based open.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AneIdentifierSource {
+    /// Framework default.
+    Default = 0,
+    /// Derive identity from the model URL.
+    Url = 1,
+    /// Derive identity from an explicit UUID.
+    Uuid = 2,
+    /// Derive identity from content hash.
+    Content = 3,
+}
+
+/// Options for the file-based open path (`_ANEModel modelAtURL:key:`).
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct AneModelFileOpenOptions {
+    /// Compiled `.mlmodelc` or `.bundle` URL or path. Required.
+    pub model_url: *const c_char,
+    /// Explicit cache key. Null derives one from the URL.
+    pub cache_key: *const c_char,
+    /// Optional `cacheURLIdentifier` for cache placement.
+    pub cache_url_identifier: *const c_char,
+    /// See [`AneIdentifierSource`].
+    pub identifier_source: AneIdentifierSource,
+    /// `QoS` for compile + load.
+    pub compile_qos: AneQoS,
+}
+
+/// Type tag carried by each `_ANESharedSignalEvent` / `_ANESharedWaitEvent`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AneEventType {
+    /// Framework default.
+    Default = 0,
+    /// Fires on inference start.
+    Inference = 1,
+    /// Fires on inference completion.
+    Completion = 2,
+}
+
+/// Opaque per-process session hint handed to `_ANEVirtualClient`.
+pub enum AneSessionHint {}
+
+/// Tag selecting which load-tuning hint to apply.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AneSessionHintKind {
+    /// Prefetch the compiled program into ANE SRAM.
+    Prefetch = 1,
+    /// Bias the loader toward low-latency placement.
+    LowLatency = 2,
+    /// Bias toward high-throughput placement.
+    HighThroughput = 3,
+}
+
+/// Parameters for [`ane_model_new_instance`].
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct AneModelInstanceParams {
+    /// Optional cache-key override for the new instance.
+    pub key: *const c_char,
+    /// Reserved; pass 0.
+    pub flags: u64,
+}
+
+/// Extended file-open options carrying Metal Performance Shaders
+/// constants and optional `modelAttributes` overrides.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct AneModelFileOpenOptionsEx {
+    /// Base options (URL, cache key, QoS, etc.).
+    pub base: AneModelFileOpenOptions,
+    /// `id` pointer to an `NSDictionary*` of MPS constants, or null.
+    pub mps_constants_id: *mut c_void,
+    /// `id` pointer to a `modelAttributes` `NSDictionary*` override, or null.
+    pub model_attributes_id: *mut c_void,
+}
+
+/// One stage of a chained dispatch.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct AneChainStep {
+    /// Configured [`AneRequest`] supplying the bindings, procedure index,
+    /// shared events, and transaction handle for this stage.
+    pub request: *mut AneRequest,
+    /// Loopback input symbol id wiring this stage to the previous stage.
+    pub lb_input_symbol_id: i64,
+    /// Loopback output symbol id wiring this stage to the next stage.
+    pub lb_output_symbol_id: i64,
+    /// Firmware enqueue delay in nanoseconds (0 = no delay).
+    pub fw_enqueue_delay: u64,
+    /// Shared intermediate memory pool id (0 = no pool).
+    pub memory_pool_id: u64,
+}
 
 /// Completion callback signature: `(request, status, user_ptr)`. Invoked
 /// from a library-owned worker thread; do not re-enter the library with
@@ -262,6 +423,185 @@ unsafe extern "C" {
     /// Per-request error message captured by the worker thread on the
     /// most recent eval. Returns `""` if no error or no submission yet.
     pub fn ane_request_last_error(req: *const AneRequest) -> *const c_char;
+
+    /// Populate `*out` with the ANE device facts (core count, arch string).
+    pub fn ane_device_info(out: *mut AneDeviceInfo) -> AneStatus;
+
+    /// Number of procedures (entry points) in the loaded model. Always >= 1.
+    pub fn ane_model_num_procedures(model: *const AneModel) -> i32;
+    /// Number of inputs for procedure `p`.
+    pub fn ane_model_num_inputs_for_procedure (m: *const AneModel, p: i32) -> i32;
+    /// Number of outputs for procedure `p`.
+    pub fn ane_model_num_outputs_for_procedure(m: *const AneModel, p: i32) -> i32;
+    /// Spec pointer for input `idx` of procedure `p`. Valid until model close.
+    pub fn ane_model_input_spec_for_procedure (m: *const AneModel, p: i32, idx: i32) -> *const AneTensorSpec;
+    /// Spec pointer for output `idx` of procedure `p`. Valid until model close.
+    pub fn ane_model_output_spec_for_procedure(m: *const AneModel, p: i32, idx: i32) -> *const AneTensorSpec;
+    /// Byte size of input `idx` of procedure `p`. 0 if out of range.
+    pub fn ane_model_input_nbytes_for_procedure (m: *const AneModel, p: i32, idx: i32) -> usize;
+    /// Byte size of output `idx` of procedure `p`. 0 if out of range.
+    pub fn ane_model_output_nbytes_for_procedure(m: *const AneModel, p: i32, idx: i32) -> usize;
+
+    /// Hardware queue depth reported for this model (max in-flight requests).
+    pub fn ane_model_queue_depth(m: *const AneModel) -> i32;
+    /// Number of evaluations currently in flight against this model.
+    pub fn ane_model_in_flight  (m: *const AneModel) -> i64;
+
+    /// `hexStringIdentifier` of the loaded program. Library-owned; empty if absent.
+    pub fn ane_model_program_id   (m: *const AneModel) -> *const c_char;
+    /// `weightsHash` of the descriptor. Library-owned; empty if absent.
+    pub fn ane_model_weights_hash (m: *const AneModel) -> *const c_char;
+    /// Writes the opaque driver `programHandle`. Returns true on success.
+    pub fn ane_model_program_handle            (m: *const AneModel, out: *mut u64) -> bool;
+    /// Writes the opaque `intermediateBufferHandle`. Returns true on success.
+    pub fn ane_model_intermediate_buffer_handle(m: *const AneModel, out: *mut u64) -> bool;
+
+    /// True if `aned` already has a compiled artifact for this hex hash.
+    pub fn ane_cache_exists_for_hash(hex: *const c_char) -> bool;
+    /// Evict the compiled artifact for this hex hash from `aned`.
+    pub fn ane_cache_purge_for_hash (hex: *const c_char) -> AneStatus;
+
+    /// Extended open: in-memory MIL bytes + multi-blob `NSDictionary` weights.
+    pub fn ane_model_open_ex  (opts: *const AneModelOpenOptionsEx, out: *mut *mut AneModel) -> AneStatus;
+    /// File-based open via `_ANEModel modelAtURL:key:`. Accepts compiled bundles.
+    pub fn ane_model_open_file(opts: *const AneModelFileOpenOptions, out: *mut *mut AneModel) -> AneStatus;
+
+    /// Open with the real-time priority class. Pair with [`ane_realtime_task_begin`].
+    pub fn ane_model_open_realtime   (opts: *const AneModelOpenOptions,   out: *mut *mut AneModel) -> AneStatus;
+    /// Real-time variant of [`ane_model_open_ex`].
+    pub fn ane_model_open_realtime_ex(opts: *const AneModelOpenOptionsEx, out: *mut *mut AneModel) -> AneStatus;
+    /// Enter the ANE real-time scheduling class for the current thread.
+    pub fn ane_realtime_task_begin() -> AneStatus;
+    /// Leave the real-time scheduling class.
+    pub fn ane_realtime_task_end  () -> AneStatus;
+
+    /// Allocate a fresh `_ANEPerformanceStats` wrapper for use in a request.
+    pub fn ane_perf_stats_create (out: *mut *mut AnePerfStats) -> AneStatus;
+    /// Release the stats wrapper.
+    pub fn ane_perf_stats_release(ps: *mut AnePerfStats);
+    /// Hardware execution time of the most recent eval, in nanoseconds.
+    pub fn ane_perf_stats_hw_execution_ns(ps: *const AnePerfStats) -> u64;
+    /// Byte size of the raw counter blob; use to size a buffer for `_counters_copy`.
+    pub fn ane_perf_stats_counters_nbytes(ps: *const AnePerfStats) -> usize;
+    /// Copy up to `cap` bytes of the raw counter blob into `out`; returns copied byte count.
+    pub fn ane_perf_stats_counters_copy  (ps: *const AnePerfStats, out: *mut c_void, cap: usize) -> usize;
+
+    /// Bitmask telling the driver which hardware counters to populate; set before eval.
+    pub fn ane_model_set_perf_stats_mask(m: *mut AneModel, mask: u32) -> AneStatus;
+    /// Read back the current `perfStatsMask`.
+    pub fn ane_model_get_perf_stats_mask(m: *const AneModel) -> u32;
+
+    /// Allocate a fresh `_ANESharedEvents` container.
+    pub fn ane_shared_events_create (out: *mut *mut AneSharedEvents) -> AneStatus;
+    /// Release the container and drop its event references.
+    pub fn ane_shared_events_release(ev: *mut AneSharedEvents);
+    /// Append a signal event. `mtl_shared_event` is a borrowed `id`
+    /// pointing at a Metal `MTLSharedEvent` (retained by the container).
+    pub fn ane_shared_events_add_signal(
+        ev: *mut AneSharedEvents, value: u64, symbol_index: u32,
+        event_type: AneEventType, mtl_shared_event: *mut c_void, agent_mask: u64
+    ) -> AneStatus;
+    /// Append a wait event. Same `mtl_shared_event` contract as `_add_signal`.
+    pub fn ane_shared_events_add_wait(
+        ev: *mut AneSharedEvents, value: u64,
+        mtl_shared_event: *mut c_void, event_type: AneEventType
+    ) -> AneStatus;
+    /// Number of signal events queued.
+    pub fn ane_shared_events_num_signals(ev: *const AneSharedEvents) -> i32;
+    /// Number of wait events queued.
+    pub fn ane_shared_events_num_waits  (ev: *const AneSharedEvents) -> i32;
+
+    /// Per-request weight override. Pass null to clear. Buffer must outlive the request.
+    pub fn ane_request_set_weights        (req: *mut AneRequest, weights: *mut AneBuffer)     -> AneStatus;
+    /// Select which procedure (entry point) this request targets. Default 0.
+    pub fn ane_request_set_procedure_index(req: *mut AneRequest, proc_idx: i32)               -> AneStatus;
+    /// Attach a perf-stats sink for the next eval. Null clears.
+    pub fn ane_request_set_perf_stats     (req: *mut AneRequest, ps: *mut AnePerfStats)       -> AneStatus;
+    /// Attach a shared-events container for GPU↔ANE synchronization.
+    pub fn ane_request_set_shared_events  (req: *mut AneRequest, ev: *mut AneSharedEvents)    -> AneStatus;
+    /// Set the transaction handle used to group this request with others.
+    pub fn ane_request_set_transaction    (req: *mut AneRequest, handle: u64)                 -> AneStatus;
+    /// Read the currently-set procedure index.
+    pub fn ane_request_procedure_index    (req: *const AneRequest) -> i32;
+    /// Read the currently-set transaction handle.
+    pub fn ane_request_transaction        (req: *const AneRequest) -> u64;
+
+    /// Returns the borrowed `IOSurfaceRef` backing this buffer; do not release.
+    pub fn ane_buffer_iosurface_ref  (buf: *const AneBuffer) -> *mut c_void;
+    /// Wrap a caller-supplied `IOSurfaceRef` in a fresh `AneBuffer` (CFRetains the surface).
+    pub fn ane_buffer_adopt_iosurface(surface: *mut c_void, nbytes: usize, out: *mut *mut AneBuffer) -> AneStatus;
+
+    /// Build a chained dispatch from `n_steps` configured requests.
+    pub fn ane_chain_create (steps: *const AneChainStep, n_steps: i32, out: *mut *mut AneChain) -> AneStatus;
+    /// One-time preparation: maps intermediate buffers and resolves loopback symbols.
+    pub fn ane_chain_prepare(chain: *mut AneChain, qos: AneQoS) -> AneStatus;
+    /// Submit the chain. May be called repeatedly after a successful prepare.
+    pub fn ane_chain_enqueue(chain: *mut AneChain, qos: AneQoS) -> AneStatus;
+    /// Block until the most recent enqueue completes; same timeout semantics as `ane_request_wait`.
+    pub fn ane_chain_wait   (chain: *mut AneChain, timeout_ms: c_int) -> AneStatus;
+    /// Release the chain. Safe on null.
+    pub fn ane_chain_release(chain: *mut AneChain);
+
+    /// Route a compressed weight blob through the framework's parallel decompressor.
+    /// Allocates `*out_bytes` via `malloc`; caller frees with `libc::free`.
+    pub fn ane_decompress_weights(
+        compressed: *const c_void, nbytes: usize,
+        out_bytes: *mut *mut c_void, out_nbytes: *mut usize,
+    ) -> AneStatus;
+
+    /// `_ANEModel.UUID` as a UTF-8 string; library-owned; empty if absent.
+    pub fn ane_model_uuid                (m: *const AneModel) -> *const c_char;
+    /// `_ANEModel.sourceURL.absoluteString`; library-owned; empty if absent.
+    pub fn ane_model_source_url          (m: *const AneModel) -> *const c_char;
+    /// `_ANEModel.modelURL.absoluteString`; library-owned; empty if absent.
+    pub fn ane_model_model_url           (m: *const AneModel) -> *const c_char;
+    /// `_ANEModel.key`; library-owned; empty if absent.
+    pub fn ane_model_key                 (m: *const AneModel) -> *const c_char;
+    /// `_ANEModel.cacheURLIdentifier`; library-owned; empty if absent.
+    pub fn ane_model_cache_url_identifier(m: *const AneModel) -> *const c_char;
+    /// `_ANEModel.identifierSource` raw enum value.
+    pub fn ane_model_identifier_source   (m: *const AneModel) -> i64;
+
+    /// Reset transient model state on the next unload.
+    pub fn ane_model_reset_on_unload(m: *mut AneModel) -> AneStatus;
+    /// Explicit unload (without freeing the handle). Pairs with re-load patterns.
+    pub fn ane_model_unload         (m: *mut AneModel) -> AneStatus;
+
+    /// Load a fresh runtime instance sharing the same compiled program.
+    pub fn ane_model_new_instance(
+        src: *mut AneModel, params: *const AneModelInstanceParams,
+        qos: AneQoS, out: *mut *mut AneModel,
+    ) -> AneStatus;
+
+    /// Number of aned connections currently open for loading models.
+    pub fn ane_client_num_connections() -> i32;
+    /// True if this model's `_ANEClient` is a virtual (per-process) client.
+    pub fn ane_model_is_virtual_client(m: *const AneModel) -> bool;
+
+    /// Allocate a session-hint object of the given kind.
+    pub fn ane_session_hint_create (kind: AneSessionHintKind, out: *mut *mut AneSessionHint) -> AneStatus;
+    /// Release the session-hint object.
+    pub fn ane_session_hint_release(hint: *mut AneSessionHint);
+
+    /// Apply `hint` to `model`; if `out_report_json` is non-null, the
+    /// framework's per-hint report is `malloc`'d as a UTF-8 JSON string.
+    pub fn ane_model_apply_session_hint(
+        m: *mut AneModel, hint: *const AneSessionHint, out_report_json: *mut *mut c_char,
+    ) -> AneStatus;
+
+    /// Extended file-open: includes `mpsConstants` and `modelAttributes`.
+    pub fn ane_model_open_file_ex(
+        opts: *const AneModelFileOpenOptionsEx, out: *mut *mut AneModel,
+    ) -> AneStatus;
+
+    /// Human-readable name of perf counter `counter_idx`. Library-owned.
+    pub fn ane_perf_counter_name(counter_idx: i32) -> *const c_char;
+    /// Emit os_signpost events for the counters captured by `ps`.
+    pub fn ane_perf_stats_emit_signpost(ps: *const AnePerfStats, model_string_id: u64) -> AneStatus;
+    /// Number of per-stage perf-stats objects attached to `req` (1 if single, N for chained).
+    pub fn ane_request_num_perf_stats(req: *const AneRequest) -> i32;
+    /// Borrowed stats handle for stage `idx`; null if out of range.
+    pub fn ane_request_perf_stats_at (req: *const AneRequest, idx: i32) -> *mut AnePerfStats;
 
     /// Internal: run a single adversarial case through the C-side
     /// `LiveInputList` parser. Not stable API.
