@@ -27,11 +27,11 @@ int main(int argc, char** argv) {
     AneModel* model = NULL;
     AneStatus st = ane_model_open_file(&o, &model);
     if (st != ANE_OK) {
-        fprintf(stderr, "open_file failed (%d): %s\n", st, ane_last_error());
+        fprintf(stderr, "open_file failed (%d): %s\n", (int)st, ane_last_error());
         return 1;
     }
-    fprintf(stderr, "open_file OK; inputs=%d outputs=%d\n",
-            ane_model_num_inputs(model), ane_model_num_outputs(model));
+    fprintf(stderr, "open_file OK; inputs=%d outputs=%d\n", ane_model_num_inputs(model),
+            ane_model_num_outputs(model));
 
     AneBuffer* ib = NULL;
     ane_buffer_create_for_input(model, 0, &ib);
@@ -43,17 +43,20 @@ int main(int argc, char** argv) {
     ane_request_bind_input(req, 0, ib);
     ane_request_bind_output(req, 0, ob);
 
-    AneChainStep step = { .request = req };
+    AneChainStep step = {.request = req};
     AneChain* chain = NULL;
     st = ane_chain_create(&step, 1, &chain);
-    if (st != ANE_OK) { fprintf(stderr, "chain_create (%d): %s\n", st, ane_last_error()); return 1; }
+    if (st != ANE_OK) {
+        fprintf(stderr, "chain_create (%d): %s\n", (int)st, ane_last_error());
+        return 1;
+    }
     fprintf(stderr, "chain_create OK\n");
 
     st = ane_chain_prepare(chain, ANE_QOS_DEFAULT);
-    fprintf(stderr, "chain_prepare: %d  err=%s\n", st, ane_last_error());
+    fprintf(stderr, "chain_prepare: %d  err=%s\n", (int)st, ane_last_error());
 
     st = ane_chain_enqueue(chain, ANE_QOS_DEFAULT);
-    fprintf(stderr, "chain_enqueue: %d  err=%s\n", st, ane_last_error());
+    fprintf(stderr, "chain_enqueue: %d  err=%s\n", (int)st, ane_last_error());
 
     ane_chain_release(chain);
     ane_request_release(req);

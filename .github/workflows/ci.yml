@@ -50,7 +50,22 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # ----- C library + example build -----
+      # ----- C/Obj-C formatting + static analysis -----
+      - name: Install clang-tidy (LLVM)
+        run: brew install llvm
+
+      - name: clang-format (C/Obj-C, --Werror)
+        run: |
+          xcrun clang-format --dry-run --Werror \
+            c/src/*.m c/src/*.h c/include/*.h c/examples/*.c c/examples/*.m
+
+      - name: clang-tidy (C/Obj-C library, max checks as errors)
+        run: |
+          "$(brew --prefix llvm)/bin/clang-tidy" \
+            c/src/ane_bridge.m c/src/ane_private.m -- \
+            -I c/include -fno-objc-arc -x objective-c -isysroot "$(xcrun --show-sdk-path)"
+
+      # ----- C library + example build (-Weverything -Werror via Makefile) -----
       - name: Build dylib + C examples
         run: |
           make

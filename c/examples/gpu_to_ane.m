@@ -35,27 +35,32 @@
 
 static IOSurfaceRef make_iosurface(size_t nbytes) {
     size_t W, H;
-    if (nbytes == 0)         { W = 1;      H = 1; }
-    else if (nbytes <= 16384){ W = nbytes; H = 1; }
-    else {
+    if (nbytes == 0) {
+        W = 1;
+        H = 1;
+    } else if (nbytes <= 16384) {
+        W = nbytes;
+        H = 1;
+    } else {
         W = 4096;
-        while (nbytes % W) W /= 2;
+        while (nbytes % W) {
+            W /= 2;
+        }
         H = nbytes / W;
     }
     NSDictionary* props = @{
-        (id)kIOSurfaceWidth:           @(W),
-        (id)kIOSurfaceHeight:          @(H),
+        (id)kIOSurfaceWidth: @(W),
+        (id)kIOSurfaceHeight: @(H),
         (id)kIOSurfaceBytesPerElement: @1,
-        (id)kIOSurfaceBytesPerRow:     @(W),
-        (id)kIOSurfaceAllocSize:       @(nbytes ? nbytes : 1),
-        (id)kIOSurfacePixelFormat:     @0,
+        (id)kIOSurfaceBytesPerRow: @(W),
+        (id)kIOSurfaceAllocSize: @(nbytes ? nbytes : 1),
+        (id)kIOSurfacePixelFormat: @0,
     };
     return IOSurfaceCreate((__bridge CFDictionaryRef)props);
 }
 
-static void die(const char* what, AneStatus st) {
-    fprintf(stderr, "%s: status=%d, last_error=%s\n",
-            what, (int)st, ane_last_error());
+__attribute__((noreturn)) static void die(const char* what, AneStatus st) {
+    fprintf(stderr, "%s: status=%d, last_error=%s\n", what, (int)st, ane_last_error());
     exit(1);
 }
 
@@ -67,34 +72,38 @@ int main(int argc, char** argv) {
 
     @autoreleasepool {
         AneModelOpenOptions opts = {
-            .mil_path     = argv[1],
+            .mil_path = argv[1],
             .weights_path = argv[2],
-            .compile_qos  = ANE_QOS_DEFAULT,
+            .compile_qos = ANE_QOS_DEFAULT,
         };
         AneModel* model = NULL;
         AneStatus st = ane_model_open(&opts, &model);
-        if (st != ANE_OK) die("ane_model_open", st);
+        if (st != ANE_OK) {
+            die("ane_model_open", st);
+        }
 
-        size_t nbytes_in  = ane_model_input_nbytes(model, 0);
+        size_t nbytes_in = ane_model_input_nbytes(model, 0);
         size_t nbytes_out = ane_model_output_nbytes(model, 0);
-        size_t n_floats   = nbytes_in / sizeof(float);
+        size_t n_floats = nbytes_in / sizeof(float);
         if (nbytes_in != nbytes_out) {
-            fprintf(stderr, "identity model expected; got in=%zu out=%zu\n",
-                    nbytes_in, nbytes_out);
+            fprintf(stderr, "identity model expected; got in=%zu out=%zu\n", nbytes_in, nbytes_out);
             return 1;
         }
 
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-        if (!device) { fprintf(stderr, "no Metal device\n"); return 1; }
+        if (!device) {
+            fprintf(stderr, "no Metal device\n");
+            return 1;
+        }
         id<MTLCommandQueue> queue = [device newCommandQueue];
 
         IOSurfaceRef src_surface = make_iosurface(nbytes_in);
-        IOSurfaceLock(src_surface, 0, NULL);
+        IOSurfaceLock(src_surface, (IOSurfaceLockOptions)0, NULL);
         float* src = (float*)IOSurfaceGetBaseAddress(src_surface);
         for (size_t i = 0; i < n_floats; i++) {
-            src[i] = (float)((i % 100) + 1);  /* fp16-exact */
+            src[i] = (float)((i % 100) + 1); /* fp16-exact */
         }
-        IOSurfaceUnlock(src_surface, 0, NULL);
+        IOSurfaceUnlock(src_surface, (IOSurfaceLockOptions)0, NULL);
         id<MTLBuffer> src_mtl = [device newBufferWithBytesNoCopy:src
                                                           length:nbytes_in
                                                          options:MTLResourceStorageModeShared
@@ -103,7 +112,9 @@ int main(int argc, char** argv) {
         IOSurfaceRef ane_in_surface = make_iosurface(nbytes_in);
         AneBuffer* ane_in_buf = NULL;
         st = ane_buffer_adopt_iosurface((void*)ane_in_surface, nbytes_in, &ane_in_buf);
-        if (st != ANE_OK) die("ane_buffer_adopt_iosurface", st);
+        if (st != ANE_OK) {
+            die("ane_buffer_adopt_iosurface", st);
+        }
         CFRelease(ane_in_surface);
 
         IOSurfaceRef ane_in_back = (IOSurfaceRef)ane_buffer_iosurface_ref(ane_in_buf);
@@ -119,26 +130,38 @@ int main(int argc, char** argv) {
 
         AneBuffer* ane_out_buf = NULL;
         st = ane_buffer_create_for_output(model, 0, &ane_out_buf);
-        if (st != ANE_OK) die("ane_buffer_create_for_output", st);
+        if (st != ANE_OK) {
+            die("ane_buffer_create_for_output", st);
+        }
 
         AneRequest* req = NULL;
         st = ane_request_create(model, &req);
-        if (st != ANE_OK) die("ane_request_create", st);
-        if ((st = ane_request_bind_input (req, 0, ane_in_buf )) != ANE_OK) die("bind_input",  st);
-        if ((st = ane_request_bind_output(req, 0, ane_out_buf)) != ANE_OK) die("bind_output", st);
+        if (st != ANE_OK) {
+            die("ane_request_create", st);
+        }
+        if ((st = ane_request_bind_input(req, 0, ane_in_buf)) != ANE_OK) {
+            die("bind_input", st);
+        }
+        if ((st = ane_request_bind_output(req, 0, ane_out_buf)) != ANE_OK) {
+            die("bind_output", st);
+        }
 
         /* GPU writes through MTLBuffer that aliases ANE's input IOSurface. */
         id<MTLCommandBuffer> cb = [queue commandBuffer];
         id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-        [blit copyFromBuffer:src_mtl sourceOffset:0
-                    toBuffer:ane_in_mtl destinationOffset:0
-                        size:nbytes_in];
+        [blit copyFromBuffer:src_mtl
+                 sourceOffset:0
+                     toBuffer:ane_in_mtl
+            destinationOffset:0
+                         size:nbytes_in];
         [blit endEncoding];
         [cb commit];
         [cb waitUntilCompleted];
 
         st = ane_request_run(req, ANE_QOS_DEFAULT);
-        if (st != ANE_OK) die("ane_request_run", st);
+        if (st != ANE_OK) {
+            die("ane_request_run", st);
+        }
 
         void* out_ptr = NULL;
         ane_buffer_lock(ane_out_buf, ANE_LOCK_READ, &out_ptr);
@@ -148,8 +171,14 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < n_floats; i++) {
             float expected = (float)((i % 100) + 1);
             float err = fabsf(out[i] - expected);
-            if (err > max_abs_err) max_abs_err = err;
-            if (err < 1e-3f) matches++; else mismatches++;
+            if (err > max_abs_err) {
+                max_abs_err = err;
+            }
+            if (err < 1e-3f) {
+                matches++;
+            } else {
+                mismatches++;
+            }
         }
         ane_buffer_unlock(ane_out_buf);
 

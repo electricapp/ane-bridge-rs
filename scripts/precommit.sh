@@ -27,7 +27,27 @@ RUSTDOCFLAGS="-D warnings" \
 echo "→ cargo test --workspace (release-style, no slow examples)"
 cargo test --manifest-path rust/Cargo.toml --workspace --quiet
 
-echo "→ make (C dylib + warnings as errors)"
+echo "→ clang-format --dry-run --Werror  (c/)"
+CLANG_FORMAT="$(xcrun -f clang-format 2>/dev/null || command -v clang-format || true)"
+if [ -z "$CLANG_FORMAT" ]; then
+    echo "clang-format not found — install the Xcode Command Line Tools" >&2
+    exit 1
+fi
+"$CLANG_FORMAT" --dry-run --Werror \
+    c/src/*.m c/src/*.h c/include/*.h c/examples/*.c c/examples/*.m
+
+echo "→ clang-tidy  (c/src, max checks as errors)"
+CLANG_TIDY="${CLANG_TIDY:-$(brew --prefix llvm 2>/dev/null)/bin/clang-tidy}"
+if [ ! -x "$CLANG_TIDY" ]; then CLANG_TIDY="$(command -v clang-tidy || true)"; fi
+if [ -z "$CLANG_TIDY" ] || [ ! -x "$CLANG_TIDY" ]; then
+    echo "clang-tidy not found — install with: brew install llvm" >&2
+    exit 1
+fi
+"$CLANG_TIDY" c/src/ane_bridge.m c/src/ane_private.m -- \
+    -I c/include -fno-objc-arc -x objective-c -isysroot "$(xcrun --show-sdk-path)"
+
+echo "→ make (C dylib + examples, -Weverything -Werror)"
 make >/dev/null
+make examples >/dev/null
 
 echo "✔ all precommit checks passed"

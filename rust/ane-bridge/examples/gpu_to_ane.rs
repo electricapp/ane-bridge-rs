@@ -51,6 +51,31 @@
     clippy::semicolon_outside_block,
     clippy::semicolon_inside_block,
     clippy::semicolon_if_nothing_returned,
+    clippy::print_stderr,
+    clippy::clone_on_ref_ptr,
+    clippy::integer_division_remainder_used,
+    clippy::missing_const_for_fn,
+    clippy::use_debug,
+    clippy::little_endian_bytes,
+    clippy::big_endian_bytes,
+    clippy::deref_by_slicing,
+    clippy::doc_paragraphs_missing_punctuation,
+    clippy::doc_markdown,
+    clippy::multiple_unsafe_ops_per_block,
+    clippy::undocumented_unsafe_blocks,
+    clippy::unused_trait_names,
+    clippy::string_slice,
+    clippy::cast_possible_wrap,
+    clippy::cast_ptr_alignment,
+    clippy::assertions_on_result_states,
+    clippy::borrow_as_ptr,
+    clippy::too_many_lines,
+    clippy::unused_result_ok,
+    clippy::map_with_unused_argument_over_ranges,
+    clippy::ignored_unit_patterns,
+    clippy::unreachable,
+    clippy::decimal_literal_representation,
+    clippy::single_char_pattern,
     clippy::cast_precision_loss,
     reason = "Metal interop example uses raw FFI patterns + idiomatic CLI conventions"
 )]
@@ -267,7 +292,7 @@ fn main() -> ExitCode {
     {
         let event = device.newSharedEvent().expect("shared event");
         let mut ev = SharedEvents::new().expect("shared events create");
-        let mtl_evt_ptr: *mut c_void = (Retained::as_ptr(&event) as *const c_void).cast_mut();
+        let mtl_evt_ptr: *mut c_void = Retained::as_ptr(&event).cast::<c_void>().cast_mut();
         unsafe { ev.add_wait(1, mtl_evt_ptr, sys::AneEventType::Default) }.expect("add_wait");
 
         let mut req2 = model.request().expect("request 2");

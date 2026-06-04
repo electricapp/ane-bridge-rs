@@ -1,0 +1,81 @@
+# clang-format config for the C/Objective-C side of ane-bridge.
+#
+# Deliberately strict and canonical: one true layout, enforced in CI with
+# `--Werror`. Not tuned to preexisting style — the goal is consistency and
+# safety, not minimal diff. All reformatting is semantics-preserving.
+#
+# Notable strictness knobs:
+#   - InsertBraces: every if/for/while/else gets braces (kills goto-fail bugs)
+#   - no statement, block, function, or case body is kept on one line
+#   - 4-space indent, 100-col hard limit, left-aligned pointers
+#
+# clang-format applies the section whose `Language:` matches the file:
+# the Cpp section covers .c/.h, the ObjC section covers .m. Both blocks
+# are kept identical on purpose — edit them together.
+#
+# Run:   clang-format -i c/src/*.m c/src/*.h c/include/*.h c/examples/*
+# Check: clang-format --dry-run --Werror <files>   (CI / precommit)
+---
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+PointerAlignment: Left
+DerivePointerAlignment: false
+InsertBraces: true
+InsertNewlineAtEOF: true
+RemoveSemicolon: true
+AllowShortFunctionsOnASingleLine: None
+AllowShortBlocksOnASingleLine: Never
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignConsecutiveMacros: false
+AlignTrailingComments: true
+ReflowComments: false
+AlignEscapedNewlines: Left
+SpacesInContainerLiterals: false
+ObjCBlockIndentWidth: 4
+ObjCSpaceAfterProperty: false
+ObjCSpaceBeforeProtocolList: true
+ObjCBinPackProtocolList: Auto
+SortIncludes: false
+KeepEmptyLinesAtTheStartOfBlocks: false
+SpaceAfterCStyleCast: false
+---
+Language: ObjC
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+PointerAlignment: Left
+DerivePointerAlignment: false
+InsertBraces: true
+InsertNewlineAtEOF: true
+RemoveSemicolon: true
+AllowShortFunctionsOnASingleLine: None
+AllowShortBlocksOnASingleLine: Never
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignConsecutiveMacros: false
+AlignTrailingComments: true
+ReflowComments: false
+AlignEscapedNewlines: Left
+SpacesInContainerLiterals: false
+ObjCBlockIndentWidth: 4
+ObjCSpaceAfterProperty: false
+ObjCSpaceBeforeProtocolList: true
+ObjCBinPackProtocolList: Auto
+SortIncludes: false
+KeepEmptyLinesAtTheStartOfBlocks: false
+SpaceAfterCStyleCast: false

@@ -40,16 +40,16 @@ extern "C" {
 typedef enum AneStatus {
     ANE_OK = 0,
     ANE_ERR_INVALID_ARG = 1,
-    ANE_ERR_IO         = 2,   /* file read/write failure */
-    ANE_ERR_COMPILE    = 3,
-    ANE_ERR_LOAD       = 4,
-    ANE_ERR_EVAL       = 5,
-    ANE_ERR_OOM        = 6,
+    ANE_ERR_IO = 2, /* file read/write failure */
+    ANE_ERR_COMPILE = 3,
+    ANE_ERR_LOAD = 4,
+    ANE_ERR_EVAL = 5,
+    ANE_ERR_OOM = 6,
     ANE_ERR_UNSUPPORTED = 7,
-    ANE_ERR_TIMEOUT    = 8,
-    ANE_ERR_BUSY       = 9,   /* request already in flight */
-    ANE_ERR_NOT_DONE   = 10,  /* poll on still-running request */
-    ANE_ERR_INTERNAL   = 99,
+    ANE_ERR_TIMEOUT = 8,
+    ANE_ERR_BUSY = 9,      /* request already in flight */
+    ANE_ERR_NOT_DONE = 10, /* poll on still-running request */
+    ANE_ERR_INTERNAL = 99,
 } AneStatus;
 
 /* Thread-local last error message. NULL or "" if no error.
@@ -62,12 +62,12 @@ const char* ane_last_error(void);
  * ===================================================================== */
 
 typedef enum AneDtype {
-    ANE_DTYPE_FP32  = 1,
-    ANE_DTYPE_FP16  = 2,
+    ANE_DTYPE_FP32 = 1,
+    ANE_DTYPE_FP16 = 2,
     ANE_DTYPE_INT32 = 3,
     ANE_DTYPE_INT64 = 4,
     ANE_DTYPE_UINT8 = 5,
-    ANE_DTYPE_INT8  = 6,
+    ANE_DTYPE_INT8 = 6,
 } AneDtype;
 
 /* Size in bytes of one element of dtype. 0 if unknown. */
@@ -82,9 +82,9 @@ size_t ane_dtype_size(AneDtype dt);
  * outlive the open call. Rank is the number of dimensions; shape[i] is
  * the extent along axis i. Static shapes only (no dynamic axes). */
 typedef struct AneTensorSpec {
-    const char* name;       /* informational; may be NULL */
-    AneDtype    dtype;
-    int32_t     rank;
+    const char* name; /* informational; may be NULL */
+    AneDtype dtype;
+    int32_t rank;
     const int64_t* shape;
 } AneTensorSpec;
 
@@ -93,11 +93,11 @@ typedef struct AneTensorSpec {
  * ===================================================================== */
 
 typedef enum AneQoS {
-    ANE_QOS_DEFAULT          = 21,  /* matches existing run_mil_io behavior */
+    ANE_QOS_DEFAULT = 21, /* matches existing run_mil_io behavior */
     ANE_QOS_USER_INTERACTIVE = 33,
-    ANE_QOS_USER_INITIATED   = 25,
-    ANE_QOS_UTILITY          = 17,
-    ANE_QOS_BACKGROUND       = 9,
+    ANE_QOS_USER_INITIATED = 25,
+    ANE_QOS_UTILITY = 17,
+    ANE_QOS_BACKGROUND = 9,
 } AneQoS;
 
 /* =====================================================================
@@ -154,8 +154,8 @@ AneStatus ane_buffer_create_for_output(const AneModel* model, int32_t idx, AneBu
 void ane_buffer_release(AneBuffer* buf);
 
 typedef enum AneBufferAccess {
-    ANE_LOCK_READ      = 1,
-    ANE_LOCK_WRITE     = 2,
+    ANE_LOCK_READ = 1,
+    ANE_LOCK_WRITE = 2,
     ANE_LOCK_READWRITE = 3,
 } AneBufferAccess;
 
@@ -163,8 +163,8 @@ typedef enum AneBufferAccess {
 AneStatus ane_buffer_lock(AneBuffer* buf, AneBufferAccess access, void** out_ptr);
 AneStatus ane_buffer_unlock(AneBuffer* buf);
 
-size_t   ane_buffer_nbytes(const AneBuffer* buf);
-uint32_t ane_buffer_iosurface_id(const AneBuffer* buf);  /* 0 if none */
+size_t ane_buffer_nbytes(const AneBuffer* buf);
+uint32_t ane_buffer_iosurface_id(const AneBuffer* buf); /* 0 if none */
 
 /* =====================================================================
  * Request (one inference instance)
@@ -182,18 +182,17 @@ void ane_request_release(AneRequest* req);
  *
  * All inputs and outputs must be bound (by either bind_* or set_/get_bytes
  * fast-path APIs) before ane_request_submit. */
-AneStatus ane_request_bind_input (AneRequest* req, int32_t idx, AneBuffer* buf);
+AneStatus ane_request_bind_input(AneRequest* req, int32_t idx, AneBuffer* buf);
 AneStatus ane_request_bind_output(AneRequest* req, int32_t idx, AneBuffer* buf);
 
 /* Fast path: library owns an internal IOSurface for input idx; the bytes
  * are memcpy'd in on each call. nbytes must equal the schema's byte size.
  * Convenient but adds a copy; use bind_* for hot loops. */
-AneStatus ane_request_set_input_bytes(AneRequest* req, int32_t idx,
-                                      const void* data, size_t nbytes);
+AneStatus ane_request_set_input_bytes(AneRequest* req, int32_t idx, const void* data,
+                                      size_t nbytes);
 
 /* Fast path output read. Valid only after the request has completed. */
-AneStatus ane_request_get_output_bytes(AneRequest* req, int32_t idx,
-                                       void* data, size_t nbytes);
+AneStatus ane_request_get_output_bytes(AneRequest* req, int32_t idx, void* data, size_t nbytes);
 
 /* Submit asynchronously. Non-blocking. Returns ANE_OK on enqueue, or
  * ANE_ERR_BUSY if a prior submit on this request hasn't completed yet. */
@@ -243,9 +242,9 @@ const char* ane_bridge_version(void);
 typedef struct AneDeviceInfo {
     int32_t num_cores;
     int32_t num_anes;
-    bool    has_ane;
+    bool has_ane;
     int64_t board_type;
-    char    arch_type[32];
+    char arch_type[32];
 } AneDeviceInfo;
 
 AneStatus ane_device_info(AneDeviceInfo* out);
@@ -254,15 +253,17 @@ AneStatus ane_device_info(AneDeviceInfo* out);
  * Multi-procedure schema
  * ===================================================================== */
 
-int32_t  ane_model_num_procedures(const AneModel* model);
+int32_t ane_model_num_procedures(const AneModel* model);
 
-int32_t  ane_model_num_inputs_for_procedure (const AneModel* model, int32_t proc_idx);
-int32_t  ane_model_num_outputs_for_procedure(const AneModel* model, int32_t proc_idx);
+int32_t ane_model_num_inputs_for_procedure(const AneModel* model, int32_t proc_idx);
+int32_t ane_model_num_outputs_for_procedure(const AneModel* model, int32_t proc_idx);
 
-const AneTensorSpec* ane_model_input_spec_for_procedure (const AneModel* model, int32_t proc_idx, int32_t idx);
-const AneTensorSpec* ane_model_output_spec_for_procedure(const AneModel* model, int32_t proc_idx, int32_t idx);
+const AneTensorSpec* ane_model_input_spec_for_procedure(const AneModel* model, int32_t proc_idx,
+                                                        int32_t idx);
+const AneTensorSpec* ane_model_output_spec_for_procedure(const AneModel* model, int32_t proc_idx,
+                                                         int32_t idx);
 
-size_t ane_model_input_nbytes_for_procedure (const AneModel* model, int32_t proc_idx, int32_t idx);
+size_t ane_model_input_nbytes_for_procedure(const AneModel* model, int32_t proc_idx, int32_t idx);
 size_t ane_model_output_nbytes_for_procedure(const AneModel* model, int32_t proc_idx, int32_t idx);
 
 /* =====================================================================
@@ -270,19 +271,19 @@ size_t ane_model_output_nbytes_for_procedure(const AneModel* model, int32_t proc
  * ===================================================================== */
 
 int32_t ane_model_queue_depth(const AneModel* model);
-int64_t ane_model_in_flight  (const AneModel* model);
+int64_t ane_model_in_flight(const AneModel* model);
 
 /* =====================================================================
  * Identity / cache telemetry
  * ===================================================================== */
 
-const char* ane_model_program_id   (const AneModel* model);  /* hexStringIdentifier */
-const char* ane_model_weights_hash (const AneModel* model);  /* descriptor weightsHash */
-bool        ane_model_program_handle(const AneModel* model, uint64_t* out);
-bool        ane_model_intermediate_buffer_handle(const AneModel* model, uint64_t* out);
+const char* ane_model_program_id(const AneModel* model);   /* hexStringIdentifier */
+const char* ane_model_weights_hash(const AneModel* model); /* descriptor weightsHash */
+bool ane_model_program_handle(const AneModel* model, uint64_t* out);
+bool ane_model_intermediate_buffer_handle(const AneModel* model, uint64_t* out);
 
-bool        ane_cache_exists_for_hash(const char* hex_hash);
-AneStatus   ane_cache_purge_for_hash (const char* hex_hash);
+bool ane_cache_exists_for_hash(const char* hex_hash);
+AneStatus ane_cache_purge_for_hash(const char* hex_hash);
 
 /* =====================================================================
  * Extended open: in-memory MIL bytes + multi-blob NSDictionary weights
@@ -294,19 +295,19 @@ typedef struct AneWeightEntry {
     /* Exactly one of (path) OR (bytes,nbytes) must be set. */
     const char* path;
     const void* bytes;
-    size_t      nbytes;
+    size_t nbytes;
 } AneWeightEntry;
 
 typedef struct AneModelOpenOptionsEx {
     /* Provide MIL either by path or by in-memory bytes. */
     const char* mil_path;
     const void* mil_bytes;
-    size_t      mil_nbytes;
+    size_t mil_nbytes;
 
     /* Multiple named weight blobs. NULL+0 is permitted for weight-less
      * MIL programs. */
     const AneWeightEntry* weights;
-    int32_t                n_weights;
+    int32_t n_weights;
 
     AneQoS compile_qos;
 
@@ -325,10 +326,10 @@ AneStatus ane_model_open_ex(const AneModelOpenOptionsEx* opts, AneModel** out_mo
  * ===================================================================== */
 
 typedef enum AneIdentifierSource {
-    ANE_IDENT_DEFAULT  = 0,
-    ANE_IDENT_URL      = 1,
-    ANE_IDENT_UUID     = 2,
-    ANE_IDENT_CONTENT  = 3,
+    ANE_IDENT_DEFAULT = 0,
+    ANE_IDENT_URL = 1,
+    ANE_IDENT_UUID = 2,
+    ANE_IDENT_CONTENT = 3,
 } AneIdentifierSource;
 
 typedef struct AneModelFileOpenOptions {
@@ -340,7 +341,7 @@ typedef struct AneModelFileOpenOptions {
     const char* cache_url_identifier;
     /* See `AneIdentifierSource`. */
     AneIdentifierSource identifier_source;
-    AneQoS              compile_qos;
+    AneQoS compile_qos;
 } AneModelFileOpenOptions;
 
 AneStatus ane_model_open_file(const AneModelFileOpenOptions* opts, AneModel** out_model);
@@ -349,10 +350,10 @@ AneStatus ane_model_open_file(const AneModelFileOpenOptions* opts, AneModel** ou
  * Real-time priority class
  * ===================================================================== */
 
-AneStatus ane_model_open_realtime   (const AneModelOpenOptions* opts, AneModel** out_model);
+AneStatus ane_model_open_realtime(const AneModelOpenOptions* opts, AneModel** out_model);
 AneStatus ane_model_open_realtime_ex(const AneModelOpenOptionsEx* opts, AneModel** out_model);
 AneStatus ane_realtime_task_begin(void);
-AneStatus ane_realtime_task_end  (void);
+AneStatus ane_realtime_task_end(void);
 
 /* =====================================================================
  * Performance stats
@@ -361,20 +362,20 @@ AneStatus ane_realtime_task_end  (void);
 typedef struct AnePerfStats AnePerfStats;
 
 AneStatus ane_perf_stats_create(AnePerfStats** out);
-void      ane_perf_stats_release(AnePerfStats* ps);
+void ane_perf_stats_release(AnePerfStats* ps);
 
 /* Hardware execution time of the most recent eval that referenced this
  * stats object, in nanoseconds. 0 if not yet populated. */
-uint64_t  ane_perf_stats_hw_execution_ns(const AnePerfStats* ps);
+uint64_t ane_perf_stats_hw_execution_ns(const AnePerfStats* ps);
 
 /* Raw counter blob; size first via *_nbytes then copy with *_copy. */
-size_t    ane_perf_stats_counters_nbytes(const AnePerfStats* ps);
-size_t    ane_perf_stats_counters_copy  (const AnePerfStats* ps, void* out, size_t cap);
+size_t ane_perf_stats_counters_nbytes(const AnePerfStats* ps);
+size_t ane_perf_stats_counters_copy(const AnePerfStats* ps, void* out, size_t cap);
 
 /* Per-model mask controlling which hardware counters are populated.
  * Set BEFORE `ane_request_run`/`submit`. */
 AneStatus ane_model_set_perf_stats_mask(AneModel* model, uint32_t mask);
-uint32_t  ane_model_get_perf_stats_mask(const AneModel* model);
+uint32_t ane_model_get_perf_stats_mask(const AneModel* model);
 
 /* =====================================================================
  * GPU↔ANE shared event sync (Metal interop)
@@ -383,32 +384,27 @@ uint32_t  ane_model_get_perf_stats_mask(const AneModel* model);
 typedef struct AneSharedEvents AneSharedEvents;
 
 typedef enum AneEventType {
-    ANE_EVT_DEFAULT      = 0,
-    ANE_EVT_INFERENCE    = 1,
-    ANE_EVT_COMPLETION   = 2,
+    ANE_EVT_DEFAULT = 0,
+    ANE_EVT_INFERENCE = 1,
+    ANE_EVT_COMPLETION = 2,
 } AneEventType;
 
 AneStatus ane_shared_events_create(AneSharedEvents** out);
-void      ane_shared_events_release(AneSharedEvents* ev);
+void ane_shared_events_release(AneSharedEvents* ev);
 
 /* `mtl_shared_event` is a (void*)id pointer to a Metal `MTLSharedEvent`
  * (or compatible). It is retained by the events object.
  *
  * `agent_mask` selects which ANE agent should signal. Pass 0 for default. */
-AneStatus ane_shared_events_add_signal(AneSharedEvents* ev,
-                                       uint64_t      value,
-                                       uint32_t      symbol_index,
-                                       AneEventType  event_type,
-                                       void*         mtl_shared_event,
-                                       uint64_t      agent_mask);
+AneStatus ane_shared_events_add_signal(AneSharedEvents* ev, uint64_t value, uint32_t symbol_index,
+                                       AneEventType event_type, void* mtl_shared_event,
+                                       uint64_t agent_mask);
 
-AneStatus ane_shared_events_add_wait  (AneSharedEvents* ev,
-                                       uint64_t      value,
-                                       void*         mtl_shared_event,
-                                       AneEventType  event_type);
+AneStatus ane_shared_events_add_wait(AneSharedEvents* ev, uint64_t value, void* mtl_shared_event,
+                                     AneEventType event_type);
 
-int32_t   ane_shared_events_num_signals(const AneSharedEvents* ev);
-int32_t   ane_shared_events_num_waits  (const AneSharedEvents* ev);
+int32_t ane_shared_events_num_signals(const AneSharedEvents* ev);
+int32_t ane_shared_events_num_waits(const AneSharedEvents* ev);
 
 /* =====================================================================
  * Extended request configuration
@@ -416,14 +412,14 @@ int32_t   ane_shared_events_num_waits  (const AneSharedEvents* ev);
 
 /* Per-request weights override. The buffer remains caller-owned and
  * must outlive the request (or until cleared by passing NULL). */
-AneStatus ane_request_set_weights        (AneRequest* req, AneBuffer* weights);
+AneStatus ane_request_set_weights(AneRequest* req, AneBuffer* weights);
 AneStatus ane_request_set_procedure_index(AneRequest* req, int32_t proc_idx);
-AneStatus ane_request_set_perf_stats     (AneRequest* req, AnePerfStats* ps);
-AneStatus ane_request_set_shared_events  (AneRequest* req, AneSharedEvents* ev);
-AneStatus ane_request_set_transaction    (AneRequest* req, uint64_t handle);
+AneStatus ane_request_set_perf_stats(AneRequest* req, AnePerfStats* ps);
+AneStatus ane_request_set_shared_events(AneRequest* req, AneSharedEvents* ev);
+AneStatus ane_request_set_transaction(AneRequest* req, uint64_t handle);
 
-int32_t   ane_request_procedure_index(const AneRequest* req);
-uint64_t  ane_request_transaction    (const AneRequest* req);
+int32_t ane_request_procedure_index(const AneRequest* req);
+uint64_t ane_request_transaction(const AneRequest* req);
 
 /* =====================================================================
  * IOSurface interop
@@ -432,7 +428,7 @@ uint64_t  ane_request_transaction    (const AneRequest* req);
 /* Returns a borrowed `IOSurfaceRef`. Caller must NOT release it.
  * Cast the returned `void*` to `IOSurfaceRef` after including
  * <IOSurface/IOSurfaceRef.h>. */
-void*     ane_buffer_iosurface_ref(const AneBuffer* buf);
+void* ane_buffer_iosurface_ref(const AneBuffer* buf);
 
 /* Adopt a caller-owned `IOSurfaceRef` into a fresh `AneBuffer`.
  * The buffer retains the surface; you may release your own reference
@@ -463,25 +459,25 @@ typedef struct AneChainStep {
     uint64_t memory_pool_id;
 } AneChainStep;
 
-AneStatus ane_chain_create  (const AneChainStep* steps, int32_t n_steps, AneChain** out);
-AneStatus ane_chain_prepare (AneChain* chain, AneQoS qos);
-AneStatus ane_chain_enqueue (AneChain* chain, AneQoS qos);
-AneStatus ane_chain_wait    (AneChain* chain, int32_t timeout_ms);
-void      ane_chain_release (AneChain* chain);
+AneStatus ane_chain_create(const AneChainStep* steps, int32_t n_steps, AneChain** out);
+AneStatus ane_chain_prepare(AneChain* chain, AneQoS qos);
+AneStatus ane_chain_enqueue(AneChain* chain, AneQoS qos);
+AneStatus ane_chain_wait(AneChain* chain, int32_t timeout_ms);
+void ane_chain_release(AneChain* chain);
 
 /* =====================================================================
  * Model accessors (post-load identity + state)
  * ===================================================================== */
 
-const char* ane_model_uuid                (const AneModel* model);
-const char* ane_model_source_url          (const AneModel* model);
-const char* ane_model_model_url           (const AneModel* model);
-const char* ane_model_key                 (const AneModel* model);
+const char* ane_model_uuid(const AneModel* model);
+const char* ane_model_source_url(const AneModel* model);
+const char* ane_model_model_url(const AneModel* model);
+const char* ane_model_key(const AneModel* model);
 const char* ane_model_cache_url_identifier(const AneModel* model);
-int64_t     ane_model_identifier_source   (const AneModel* model);
+int64_t ane_model_identifier_source(const AneModel* model);
 
-AneStatus   ane_model_reset_on_unload(AneModel* model);
-AneStatus   ane_model_unload         (AneModel* model);
+AneStatus ane_model_reset_on_unload(AneModel* model);
+AneStatus ane_model_unload(AneModel* model);
 
 /* =====================================================================
  * Load a fresh instance of an already-compiled model
@@ -496,20 +492,18 @@ typedef struct AneModelInstanceParams {
     /* Optional explicit key override; NULL inherits from `src`. */
     const char* key;
     /* Reserved; pass 0. */
-    uint64_t    flags;
+    uint64_t flags;
 } AneModelInstanceParams;
 
-AneStatus ane_model_new_instance(AneModel* src,
-                                 const AneModelInstanceParams* params,
-                                 AneQoS qos,
+AneStatus ane_model_new_instance(AneModel* src, const AneModelInstanceParams* params, AneQoS qos,
                                  AneModel** out);
 
 /* =====================================================================
  * Connection management
  * ===================================================================== */
 
-int32_t ane_client_num_connections   (void);
-bool    ane_model_is_virtual_client  (const AneModel* model);
+int32_t ane_client_num_connections(void);
+bool ane_model_is_virtual_client(const AneModel* model);
 
 /* =====================================================================
  * Session hints (load-tuning advisories)
@@ -518,20 +512,19 @@ bool    ane_model_is_virtual_client  (const AneModel* model);
 typedef struct AneSessionHint AneSessionHint;
 
 typedef enum AneSessionHintKind {
-    ANE_HINT_PREFETCH       = 1,
-    ANE_HINT_LOW_LATENCY    = 2,
+    ANE_HINT_PREFETCH = 1,
+    ANE_HINT_LOW_LATENCY = 2,
     ANE_HINT_HIGH_THROUGHPUT = 3,
 } AneSessionHintKind;
 
-AneStatus ane_session_hint_create (AneSessionHintKind kind, AneSessionHint** out);
-void      ane_session_hint_release(AneSessionHint* hint);
+AneStatus ane_session_hint_create(AneSessionHintKind kind, AneSessionHint** out);
+void ane_session_hint_release(AneSessionHint* hint);
 
 /* Apply `hint` to `model`. Writes the framework's per-hint report
  * (an opaque NSData/NSDictionary description) into a freshly-malloc'd
  * UTF-8 string at `*out_report_json` if non-NULL; caller frees with
  * `free()`. */
-AneStatus ane_model_apply_session_hint(AneModel* model,
-                                       const AneSessionHint* hint,
+AneStatus ane_model_apply_session_hint(AneModel* model, const AneSessionHint* hint,
                                        char** out_report_json);
 
 /* =====================================================================
@@ -550,8 +543,7 @@ typedef struct AneModelFileOpenOptionsEx {
     void* model_attributes_id;
 } AneModelFileOpenOptionsEx;
 
-AneStatus ane_model_open_file_ex(const AneModelFileOpenOptionsEx* opts,
-                                 AneModel** out_model);
+AneStatus ane_model_open_file_ex(const AneModelFileOpenOptionsEx* opts, AneModel** out_model);
 
 /* =====================================================================
  * Performance counter naming / signpost emission
@@ -579,8 +571,8 @@ AnePerfStats* ane_request_perf_stats_at(const AneRequest* req, int32_t idx);
  * blobs, this routes through it. Returns OK and writes the decompressed
  * bytes to a freshly malloc()'d buffer in `*out_bytes`; caller frees
  * with `free()`. */
-AneStatus ane_decompress_weights(const void* compressed, size_t compressed_nbytes,
-                                 void** out_bytes, size_t* out_nbytes);
+AneStatus ane_decompress_weights(const void* compressed, size_t cn, void** out_bytes,
+                                 size_t* out_nbytes);
 
 /* =====================================================================
  * Internal test hooks (NOT part of the stable API)
@@ -594,36 +586,44 @@ AneStatus ane_decompress_weights(const void* compressed, size_t compressed_nbyte
 /* Bitmask of which keys are present in the synthesized LiveInputList
  * entry that `_ane_internal_fuzz_parse_one` builds. */
 typedef enum {
-    ANE_FUZZ_FIELD_NAME     = 1 << 0,
-    ANE_FUZZ_FIELD_TYPE     = 1 << 1,
-    ANE_FUZZ_FIELD_BATCHES  = 1 << 2,
+    ANE_FUZZ_FIELD_NAME = 1 << 0,
+    ANE_FUZZ_FIELD_TYPE = 1 << 1,
+    ANE_FUZZ_FIELD_BATCHES = 1 << 2,
     ANE_FUZZ_FIELD_CHANNELS = 1 << 3,
-    ANE_FUZZ_FIELD_DEPTH    = 1 << 4,
-    ANE_FUZZ_FIELD_HEIGHT   = 1 << 5,
-    ANE_FUZZ_FIELD_WIDTH    = 1 << 6,
-    ANE_FUZZ_FIELD_ALL      = 0x7F,
+    ANE_FUZZ_FIELD_DEPTH = 1 << 4,
+    ANE_FUZZ_FIELD_HEIGHT = 1 << 5,
+    ANE_FUZZ_FIELD_WIDTH = 1 << 6,
+    ANE_FUZZ_FIELD_ALL = 0x7F,
 } AneFuzzFieldMask;
 
 /* Bit positions used by AneFuzzCase.flags. Kept in this enum so the
  * Rust mirror stays in lockstep without relying on implementation-
  * defined C bitfield packing. */
 typedef enum {
-    ANE_FUZZ_FLAG_BATCHES_AS_STRING  = 1 << 0,
+    ANE_FUZZ_FLAG_BATCHES_AS_STRING = 1 << 0,
     ANE_FUZZ_FLAG_CHANNELS_AS_STRING = 1 << 1,
-    ANE_FUZZ_FLAG_DEPTH_AS_STRING    = 1 << 2,
-    ANE_FUZZ_FLAG_HEIGHT_AS_STRING   = 1 << 3,
-    ANE_FUZZ_FLAG_WIDTH_AS_STRING    = 1 << 4,
-    ANE_FUZZ_FLAG_NAME_AS_NUMBER     = 1 << 5,
-    ANE_FUZZ_FLAG_TYPE_AS_NUMBER     = 1 << 6,
+    ANE_FUZZ_FLAG_DEPTH_AS_STRING = 1 << 2,
+    ANE_FUZZ_FLAG_HEIGHT_AS_STRING = 1 << 3,
+    ANE_FUZZ_FLAG_WIDTH_AS_STRING = 1 << 4,
+    ANE_FUZZ_FLAG_NAME_AS_NUMBER = 1 << 5,
+    ANE_FUZZ_FLAG_TYPE_AS_NUMBER = 1 << 6,
 } AneFuzzFlag;
 
 typedef struct AneFuzzCase {
-    uint32_t    present_mask;   /* see AneFuzzFieldMask */
-    uint32_t    flags;          /* see AneFuzzFlag */
+    uint32_t present_mask; /* see AneFuzzFieldMask */
+    uint32_t flags;        /* see AneFuzzFlag */
     const char* name;
     const char* type_string;
-    int64_t     batches, channels, depth, height, width;
+    int64_t batches, channels, depth, height, width;
 } AneFuzzCase;
+
+/* The fuzz hooks below intentionally take a leading underscore to mark them
+ * internal / do-not-link. A leading underscore at file scope is reserved for
+ * the implementation by the C standard, so -Wreserved-identifier is silenced
+ * for this block only — the names are ours and the convention is deliberate.
+ * (Renaming would ripple across the Rust FFI bindings that reference them.) */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreserved-identifier"
 
 /* Synthesize a one-entry LiveInputList from `fc`, run it through the
  * production spec parser, and return the resulting AneStatus. Used
@@ -636,21 +636,21 @@ AneStatus _ane_internal_fuzz_parse_one(const AneFuzzCase* fc);
  * mutates a key to test the type-checks in `derive_specs_from_attrs`. */
 typedef enum {
     /* Replace `NetworkStatusList` value with a non-array. */
-    ANE_FUZZ_ATTRS_NSL_NOT_ARRAY        = 1 << 0,
+    ANE_FUZZ_ATTRS_NSL_NOT_ARRAY = 1 << 0,
     /* Omit `NetworkStatusList` entirely. */
-    ANE_FUZZ_ATTRS_NSL_MISSING          = 1 << 1,
+    ANE_FUZZ_ATTRS_NSL_MISSING = 1 << 1,
     /* `NetworkStatusList` is an empty array. */
-    ANE_FUZZ_ATTRS_NSL_EMPTY            = 1 << 2,
+    ANE_FUZZ_ATTRS_NSL_EMPTY = 1 << 2,
     /* `NetworkStatusList[0]` is not a dictionary. */
-    ANE_FUZZ_ATTRS_PROC_NOT_DICT        = 1 << 3,
+    ANE_FUZZ_ATTRS_PROC_NOT_DICT = 1 << 3,
     /* Omit `LiveInputList` from the procedure dict. */
-    ANE_FUZZ_ATTRS_LIVEIN_MISSING       = 1 << 4,
+    ANE_FUZZ_ATTRS_LIVEIN_MISSING = 1 << 4,
     /* Omit `LiveOutputList` from the procedure dict. */
-    ANE_FUZZ_ATTRS_LIVEOUT_MISSING      = 1 << 5,
+    ANE_FUZZ_ATTRS_LIVEOUT_MISSING = 1 << 5,
     /* `LiveInputList` is not an array. */
-    ANE_FUZZ_ATTRS_LIVEIN_NOT_ARRAY     = 1 << 6,
+    ANE_FUZZ_ATTRS_LIVEIN_NOT_ARRAY = 1 << 6,
     /* `LiveOutputList` is not an array. */
-    ANE_FUZZ_ATTRS_LIVEOUT_NOT_ARRAY    = 1 << 7,
+    ANE_FUZZ_ATTRS_LIVEOUT_NOT_ARRAY = 1 << 7,
 } AneFuzzAttrsMutation;
 
 typedef struct AneFuzzAttrsCase {
@@ -658,9 +658,9 @@ typedef struct AneFuzzAttrsCase {
     uint32_t mutations;
     /* Number of well-formed entries to put in LiveInputList (unless
      * a mutation overrides). */
-    int32_t  n_inputs;
+    int32_t n_inputs;
     /* Number of well-formed entries to put in LiveOutputList. */
-    int32_t  n_outputs;
+    int32_t n_outputs;
 } AneFuzzAttrsCase;
 
 /* Synthesize a full `modelAttributes`-shaped dictionary controlled by
@@ -707,6 +707,8 @@ AneStatus _ane_internal_fuzz_huge_name(size_t length);
  * and the SECOND has an invalid Type. The parser must reject the
  * whole list, not partial-accept just the first entry. */
 AneStatus _ane_internal_fuzz_mixed_validity_two_entries(void);
+
+#pragma clang diagnostic pop
 
 #ifdef __cplusplus
 }

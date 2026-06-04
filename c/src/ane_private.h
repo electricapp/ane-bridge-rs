@@ -11,19 +11,19 @@
 #import <Foundation/Foundation.h>
 #import <IOSurface/IOSurface.h>
 
-extern Class g_AneDescriptorCls;       /* _ANEInMemoryModelDescriptor */
-extern Class g_AneInMemoryCls;         /* _ANEInMemoryModel */
-extern Class g_AneRequestCls;          /* _ANERequest */
-extern Class g_AneIOSurfaceCls;        /* _ANEIOSurfaceObject */
-extern Class g_AneClientCls;           /* _ANEClient */
-extern Class g_AneModelCls;            /* _ANEModel */
-extern Class g_AneVirtualClientCls;    /* _ANEVirtualClient */
-extern Class g_AnePerfStatsCls;        /* _ANEPerformanceStats */
-extern Class g_AneSharedEventsCls;     /* _ANESharedEvents */
-extern Class g_AneSharedSignalEventCls;/* _ANESharedSignalEvent */
-extern Class g_AneSharedWaitEventCls;  /* _ANESharedWaitEvent */
-extern Class g_AneChainingRequestCls;  /* _ANEChainingRequest */
-extern Class g_AneDeviceInfoCls;       /* _ANEDeviceInfo */
+extern Class g_AneDescriptorCls;        /* _ANEInMemoryModelDescriptor */
+extern Class g_AneInMemoryCls;          /* _ANEInMemoryModel */
+extern Class g_AneRequestCls;           /* _ANERequest */
+extern Class g_AneIOSurfaceCls;         /* _ANEIOSurfaceObject */
+extern Class g_AneClientCls;            /* _ANEClient */
+extern Class g_AneModelCls;             /* _ANEModel */
+extern Class g_AneVirtualClientCls;     /* _ANEVirtualClient */
+extern Class g_AnePerfStatsCls;         /* _ANEPerformanceStats */
+extern Class g_AneSharedEventsCls;      /* _ANESharedEvents */
+extern Class g_AneSharedSignalEventCls; /* _ANESharedSignalEvent */
+extern Class g_AneSharedWaitEventCls;   /* _ANESharedWaitEvent */
+extern Class g_AneChainingRequestCls;   /* _ANEChainingRequest */
+extern Class g_AneDeviceInfoCls;        /* _ANEDeviceInfo */
 
 /* Associated-object key used to store per-instance symbol indices
  * we publish via the `-symbolIndex` stub installed at load time. */

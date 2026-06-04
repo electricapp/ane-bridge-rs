@@ -16,8 +16,33 @@ SRC_DIR       := c/src
 EXAMPLES_DIR  := c/examples
 
 CC            ?= xcrun clang
-CFLAGS        ?= -O2 -Wall -Wextra -Wno-unused-parameter -fno-objc-arc \
-                 -fobjc-link-runtime -I$(INCLUDE_DIR)
+
+# Maximum-strictness warning policy for the C/Obj-C side.
+#
+# `-Weverything -Werror` opts into every warning clang knows and makes them
+# fatal. The `-Wno-*` list opts out ONLY of categories that fight idioms this
+# codebase deliberately uses; each one is load-bearing — do not drop a line
+# without checking what it re-enables:
+#   declaration-after-statement  C99 mixed declarations are intentional
+#   objc-messaging-id            the private _ANE* framework is dispatched via `id`
+#   cast-function-type-strict    required typed-cast idiom for objc_msgSend
+#   padded                       struct/inter-field padding is not actionable
+#   poison-system-directories    cross-compile-only noise; irrelevant on-host
+#   switch-default               exhaustive switches use a trailing fallback return
+#                                (adding `default:` would trip -Wcovered-switch-default)
+#   unused-parameter             callback / function-pointer signatures carry unused args
+#   double-promotion             benign float->double in numeric / printf example code
+WARN          := -Weverything -Werror \
+                 -Wno-declaration-after-statement \
+                 -Wno-objc-messaging-id \
+                 -Wno-cast-function-type-strict \
+                 -Wno-padded \
+                 -Wno-poison-system-directories \
+                 -Wno-switch-default \
+                 -Wno-unused-parameter \
+                 -Wno-double-promotion
+
+CFLAGS        ?= -O2 $(WARN) -fno-objc-arc -fobjc-link-runtime -I$(INCLUDE_DIR)
 LDFLAGS_LIB   := -dynamiclib -install_name @rpath/libane_bridge.dylib \
                  -framework Foundation -framework IOSurface -ldl
 LDFLAGS_BIN   := -Wl,-rpath,@executable_path/../lib -L$(LIB_DIR) -lane_bridge \

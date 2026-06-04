@@ -1,0 +1,89 @@
+# clang-tidy config for the C/Objective-C side of ane-bridge.
+#
+# Philosophy: enable every general-purpose check family at full strength and
+# treat findings as errors. The disabled checks below are NOT turned off to
+# dodge cleanup — each is either impossible in C, would break the public API,
+# fights an unavoidable C idiom, or encodes another project's house style.
+# Everything else must pass clean (see CI / scripts/precommit.sh).
+#
+# Run on the library:
+#   clang-tidy c/src/ane_bridge.m c/src/ane_private.m -- \
+#       -I c/include -fno-objc-arc -x objective-c -isysroot "$(xcrun --show-sdk-path)"
+Checks: >
+  *,
+  -llvmlibc-*,
+  -fuchsia-*,
+  -altera-*,
+  -android-*,
+  -zircon-*,
+  -mpi-*,
+  -openmp-*,
+  -linuxkernel-*,
+  -abseil-*,
+  -boost-*,
+  -google-objc-function-naming,
+  -google-objc-global-variable-declaration,
+  -google-readability-casting,
+  -modernize-avoid-c-style-cast,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-implicit-bool-conversion,
+  -readability-function-cognitive-complexity,
+  -bugprone-easily-swappable-parameters,
+  -hicpp-signed-bitwise,
+  -bugprone-reserved-identifier,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -llvm-header-guard,
+  -llvm-include-order,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -darwin-dispatch-once-nonstatic,
+  -modernize-use-trailing-return-type,
+  -modernize-use-using,
+  -modernize-deprecated-headers,
+  -hicpp-deprecated-headers,
+  -cppcoreguidelines-use-enum-class,
+  -performance-enum-size
+# Why each disable (grouped):
+#   llvmlibc/fuchsia/altera/android/zircon/mpi/openmp/linuxkernel/abseil/boost
+#       — coding standards for *other* projects (e.g. llvmlibc flags every
+#         <stdlib.h> include); irrelevant to this library.
+#   google-objc-function-naming / google-objc-global-variable-declaration
+#       — want UpperCamelCase ObjC names; this is a snake_case C ABI whose
+#         symbols are bound by name from the Rust FFI layer. Renaming breaks it.
+#   google-readability-casting / modernize-avoid-c-style-cast
+#       — want static_cast<>; that syntax does not exist in C/Obj-C.
+#   cppcoreguidelines-avoid-non-const-global-variables
+#       — the thread-local error key, pthread_once tokens, and framework-load
+#         state are inherently file-scope globals.
+#   *-magic-numbers / readability-identifier-length / *-implicit-bool-conversion
+#       — fight idiomatic systems C (`if (ptr)`, loop index `i`, sizes like 4096).
+#   readability-function-cognitive-complexity / bugprone-easily-swappable-parameters
+#       — metric/heuristic opinions with high false-positive rates.
+#   hicpp-signed-bitwise
+#       — C enumeration constants are always type `int`, so bitmask-enum tests
+#         (`mask & ANE_FUZZ_FIELD_NAME`) always have a signed operand. The masks
+#         are single non-negative bits, so the conversion is well-defined.
+#   bugprone-reserved-identifier / cert-dcl37-c / cert-dcl51-cpp
+#       — the `_ane_internal_fuzz_*` hooks use a deliberate leading-underscore
+#         convention (see the suppression block in ane_bridge.h).
+#   llvm-header-guard — wants a full-path macro guard format; opinion.
+#   llvm-include-order — includes are deliberately ordered ("own header first"
+#       as a self-containment check); matches clang-format SortIncludes:false.
+#   clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+#       — wants the C11 Annex K `_s` functions (fprintf_s, memcpy_s) which are
+#         not implemented on macOS/clang, so there is no portable fix.
+#   darwin-dispatch-once-nonstatic — false-positives on our usage.
+#   The following are C++-only or would break the C ABI. They are inert in our
+#   `-x objective-c` build but fire when an editor lints the public header in
+#   C++ mode; excluded so a direct header lint stays clean too:
+#     modernize-use-trailing-return-type / modernize-use-using
+#     modernize-deprecated-headers / hicpp-deprecated-headers (want <cstddef>)
+#     cppcoreguidelines-use-enum-class (no `enum class` in C)
+#     performance-enum-size (shrinking the enum base breaks the Rust FFI ABI)
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: 'c/(include|src)/.*'
+FormatStyle: file
