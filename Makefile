@@ -44,11 +44,11 @@ WARN          := -Weverything -Werror \
 
 CFLAGS        ?= -O2 $(WARN) -fno-objc-arc -fobjc-link-runtime -I$(INCLUDE_DIR)
 LDFLAGS_LIB   := -dynamiclib -install_name @rpath/libane_bridge.dylib \
-                 -framework Foundation -framework IOSurface -ldl
+                 -framework Foundation -framework IOSurface -framework CoreML -ldl
 LDFLAGS_BIN   := -Wl,-rpath,@executable_path/../lib -L$(LIB_DIR) -lane_bridge \
                  -framework Foundation -framework IOSurface
 
-SRCS          := $(SRC_DIR)/ane_private.m $(SRC_DIR)/ane_bridge.m
+SRCS          := $(SRC_DIR)/ane_private.m $(SRC_DIR)/ane_bridge.m $(SRC_DIR)/ane_state.m
 DYLIB         := $(LIB_DIR)/libane_bridge.dylib
 
 EXAMPLES      := $(BIN_DIR)/identity $(BIN_DIR)/zero_copy $(BIN_DIR)/gpu_to_ane $(BIN_DIR)/chain_identity $(BIN_DIR)/chain_file $(BIN_DIR)/ane_vs_sme

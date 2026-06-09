@@ -23,6 +23,7 @@ fn main() -> IoResult<()> {
     build
         .file(src_dir.join("ane_private.m"))
         .file(src_dir.join("ane_bridge.m"))
+        .file(src_dir.join("ane_state.m"))
         .include(&inc_dir)
         .include(&src_dir)
         .flag("-fobjc-arc-exceptions")
@@ -100,11 +101,27 @@ fn main() -> IoResult<()> {
         "cargo:rerun-if-changed={}",
         src_dir.join("ane_private.h").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        src_dir.join("ane_state.m").display()
+    );
 
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=IOSurface");
     println!("cargo:rustc-link-lib=dylib=objc");
     println!("cargo:rustc-link-lib=dylib=dl");
+    // CoreML backs the stateful inference path in `ane_state.m` (MLModel +
+    // MLState → MLE5Engine / E5RT). It is the only route that runs state ops on
+    // the ANE, and needs no ANE entitlement.
+    println!("cargo:rustc-link-lib=framework=CoreML");
+
+    // Apple's private Espresso framework — the E5RT C API bound in
+    // `src/espresso.rs`. Private frameworks aren't on the default linker
+    // search path, so point it at PrivateFrameworks. All bound symbols were
+    // verified present on macOS 26.2; a future OS that drops one fails this
+    // link (intentional — the `symbols_link` test surfaces the breakage).
+    println!("cargo:rustc-link-search=framework=/System/Library/PrivateFrameworks");
+    println!("cargo:rustc-link-lib=framework=Espresso");
     Ok(())
 }
 

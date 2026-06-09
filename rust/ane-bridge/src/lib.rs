@@ -543,6 +543,30 @@ impl Model {
         tensor_spec_from_raw(p)
     }
 
+    /// Number of declared resident state tensors (`MLState`). 0 for a
+    /// stateless model. A state is a third tensor category alongside
+    /// inputs and outputs; it does not count against [`Self::num_inputs`]
+    /// or [`Self::num_outputs`].
+    #[must_use]
+    pub fn num_states(&self) -> i32 {
+        // SAFETY: see `num_inputs`.
+        unsafe { sys::ane_model_num_states(self.inner.raw) }
+    }
+    /// Total bytes of state `idx`. 0 if `idx` is out of range.
+    #[must_use]
+    pub fn state_nbytes(&self, idx: i32) -> usize {
+        // SAFETY: see `num_inputs`; the C side range-checks `idx`.
+        unsafe { sys::ane_model_state_nbytes(self.inner.raw, idx) }
+    }
+    /// Framework-derived schema for state `idx`. Returns `None` if the
+    /// index is out of range.
+    #[must_use]
+    pub fn state(&self, idx: i32) -> Option<TensorSpec> {
+        // SAFETY: see `input`.
+        let p = unsafe { sys::ane_model_state_spec(self.inner.raw, idx) };
+        tensor_spec_from_raw(p)
+    }
+
     /// Allocate a fresh request bound to this model. The model is kept
     /// alive (via `Arc`) for the lifetime of the request.
     ///
@@ -552,6 +576,7 @@ impl Model {
     pub fn request(&self) -> Result<Request> {
         let n_in = usize::try_from(self.num_inputs().max(0)).unwrap_or(0);
         let n_out = usize::try_from(self.num_outputs().max(0)).unwrap_or(0);
+        let n_state = usize::try_from(self.num_states().max(0)).unwrap_or(0);
         let mut raw: *mut sys::AneRequest = ptr::null_mut();
         // SAFETY:
         // `inner.raw` is a valid model handle. `ane_request_create`
@@ -568,12 +593,15 @@ impl Model {
         bound_inputs.resize_with(n_in, || None);
         let mut bound_outputs = Vec::with_capacity(n_out);
         bound_outputs.resize_with(n_out, || None);
+        let mut bound_states = Vec::with_capacity(n_state);
+        bound_states.resize_with(n_state, || None);
         Ok(Request {
             raw,
             _model: self.clone(),
             callback: None,
             bound_inputs,
             bound_outputs,
+            bound_states,
             weights_buf: None,
             perf_stats: None,
             shared_events: None,
@@ -635,6 +663,28 @@ impl Model {
             return Err(Error {
                 status: sys::AneStatus::Internal,
                 message: "ane_buffer_create_for_output returned OK but null handle".into(),
+            });
+        }
+        Ok(Buffer { raw })
+    }
+
+    /// Allocate a buffer sized for state slot `idx`. Bind it once with
+    /// [`Request::bind_state`]; it then persists and is updated in place
+    /// across submits. Initialize its contents (e.g. zero) before the
+    /// first run.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::InvalidArg`] for an out-of-range `idx`,
+    /// or [`sys::AneStatus::Oom`] / framework error otherwise.
+    pub fn state_buffer(&self, idx: i32) -> Result<Buffer> {
+        let mut raw: *mut sys::AneBuffer = ptr::null_mut();
+        // SAFETY: see `buffer`. `idx` is range-checked by the C side.
+        let status = unsafe { sys::ane_buffer_create_for_state(self.inner.raw, idx, &raw mut raw) };
+        check(status)?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "ane_buffer_create_for_state returned OK but null handle".into(),
             });
         }
         Ok(Buffer { raw })
@@ -836,6 +886,10 @@ pub struct Request {
     /// Output bindings — same lifetime/append-replace discipline as
     /// `bound_inputs`, mirroring `r->output_bound` on the C side.
     bound_outputs: Vec<Option<Buffer>>,
+    /// Resident state bindings — same lifetime/append-replace discipline
+    /// as `bound_inputs`, mirroring `r->state_bound` on the C side. A
+    /// bound state buffer persists and is updated in place across submits.
+    bound_states: Vec<Option<Buffer>>,
     /// Optional separate weights buffer, retained so the C side's
     /// borrowed pointer stays valid for the request's lifetime.
     weights_buf: Option<Buffer>,
@@ -927,6 +981,37 @@ impl Request {
             self.bound_outputs.len()
         );
         if let Some(cell) = self.bound_outputs.get_mut(slot) {
+            *cell = Some(buf);
+        }
+        Ok(())
+    }
+
+    /// Bind a persistent buffer to resident state slot `idx`. The buffer
+    /// persists and is updated in place across every submit until rebound
+    /// or the request is dropped — it never crosses the host boundary per
+    /// call, so a streaming cache stays engine-resident. Initialize the
+    /// buffer (e.g. zero) before the first submit. Same ownership rules as
+    /// [`Self::bind_input`]: the Request takes the buffer.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::InvalidArg`] for an out-of-range `idx`,
+    /// or [`sys::AneStatus::Unsupported`] until the private-framework
+    /// state-binding path is wired.
+    pub fn bind_state(&mut self, idx: i32, buf: Buffer) -> Result<()> {
+        // SAFETY: see `bind_input`.
+        unsafe {
+            check(sys::ane_request_bind_state(self.raw, idx, buf.raw()))?;
+        }
+        let slot = usize::try_from(idx).map_err(|_neg| Error {
+            status: sys::AneStatus::InvalidArg,
+            message: alloc::format!("negative state index {idx}"),
+        })?;
+        debug_assert!(
+            slot < self.bound_states.len(),
+            "state slot {slot} out of range (have {})",
+            self.bound_states.len()
+        );
+        if let Some(cell) = self.bound_states.get_mut(slot) {
             *cell = Some(buf);
         }
         Ok(())
@@ -1469,6 +1554,59 @@ pub fn cache_purge_for_hash(hex_hash: &str) -> Result<()> {
     check(status)
 }
 
+/// Query an ANE network cache for the model at `model_path` (a compiled
+/// `.mlmodelc` / `.bundle` URL), via the Espresso framework. A path that was
+/// never compiled yields `Ok(false)`, not an error.
+///
+/// Which cache this reads is not yet confirmed: it is distinct from the
+/// in-memory MIL hash cache behind [`cache_exists_for_hash`], and currently
+/// reports `false` for every model tried (including ones the OS has ANE-run),
+/// so do not rely on a positive result. See `c/include/espresso.h` for the
+/// E5RT-compiler-cache hypothesis and `tests/espresso_cache.rs`.
+///
+/// # Panics
+/// Panics if `model_path` contains a NUL byte.
+///
+/// # Errors
+/// Returns [`sys::AneStatus::Internal`] if the Espresso query reports a
+/// non-zero status.
+pub fn espresso_cache_has_network<P: AsRef<Path>>(model_path: P) -> Result<bool> {
+    let c = path_to_cstring(model_path.as_ref());
+    let mut exists = false;
+    // SAFETY: `c` lives until the call returns and is read once; `exists`
+    // is a writable local the C side writes once. Both outlive the call.
+    let rc = unsafe { sys::espresso::espresso_ane_cache_has_network(c.as_ptr(), &raw mut exists) };
+    if rc != 0 {
+        return Err(Error {
+            status: sys::AneStatus::Internal,
+            message: alloc::format!("espresso_ane_cache_has_network returned status {rc}"),
+        });
+    }
+    Ok(exists)
+}
+
+/// Evict the compiled network cached under `model_path` from aned, via the
+/// Espresso framework. Path-keyed counterpart to [`cache_purge_for_hash`].
+///
+/// # Panics
+/// Panics if `model_path` contains a NUL byte.
+///
+/// # Errors
+/// Returns [`sys::AneStatus::Internal`] if the purge reports a non-zero
+/// status.
+pub fn espresso_cache_purge_network<P: AsRef<Path>>(model_path: P) -> Result<()> {
+    let c = path_to_cstring(model_path.as_ref());
+    // SAFETY: `c` lives until the call returns and is read once by the C side.
+    let rc = unsafe { sys::espresso::espresso_ane_cache_purge_network(c.as_ptr()) };
+    if rc != 0 {
+        return Err(Error {
+            status: sys::AneStatus::Internal,
+            message: alloc::format!("espresso_ane_cache_purge_network returned status {rc}"),
+        });
+    }
+    Ok(())
+}
+
 // =============================================================
 // Real-time scheduling class
 // =============================================================
@@ -1897,6 +2035,28 @@ impl Model {
     pub fn output_nbytes_for_procedure(&self, proc_idx: i32, idx: i32) -> usize {
         // SAFETY: see `output_nbytes`.
         unsafe { sys::ane_model_output_nbytes_for_procedure(self.inner.raw, proc_idx, idx) }
+    }
+
+    /// Number of resident state tensors for procedure `proc_idx`.
+    #[must_use]
+    pub fn num_states_for_procedure(&self, proc_idx: i32) -> i32 {
+        // SAFETY: see `num_inputs`.
+        unsafe { sys::ane_model_num_states_for_procedure(self.inner.raw, proc_idx) }
+    }
+
+    /// Schema of state `idx` of procedure `proc_idx`.
+    #[must_use]
+    pub fn state_for_procedure(&self, proc_idx: i32, idx: i32) -> Option<TensorSpec> {
+        // SAFETY: see `input`.
+        let p = unsafe { sys::ane_model_state_spec_for_procedure(self.inner.raw, proc_idx, idx) };
+        tensor_spec_from_raw(p)
+    }
+
+    /// Byte size of state `idx` of procedure `proc_idx`.
+    #[must_use]
+    pub fn state_nbytes_for_procedure(&self, proc_idx: i32, idx: i32) -> usize {
+        // SAFETY: see `input_nbytes`.
+        unsafe { sys::ane_model_state_nbytes_for_procedure(self.inner.raw, proc_idx, idx) }
     }
 
     /// Static hardware queue depth advertised for this model (max in-flight).
@@ -2774,4 +2934,274 @@ pub fn decompress_weights(compressed: &[u8]) -> Result<Vec<u8>> {
         free(out_ptr);
     }
     Ok(bytes)
+}
+
+// =============================================================
+// Stateful inference (CoreML MLModel + MLState) — ANE-resident state
+// =============================================================
+
+/// Like [`check`], but reads the `ane_state_*` thread-local error source.
+fn state_check(status: sys::AneStatus) -> Result<()> {
+    if matches!(status, sys::AneStatus::Ok) {
+        return Ok(());
+    }
+    // SAFETY: no-arg C function returning null or a thread-local NUL-terminated
+    // UTF-8 buffer valid until the next `ane_state_*` call on this thread; we
+    // copy it out immediately.
+    let p = unsafe { sys::ane_state_last_error() };
+    let message = if p.is_null() {
+        String::new()
+    } else {
+        // SAFETY: `p` is non-null per the check and points at a NUL-terminated
+        // string owned by the library; `into_owned` copies before any further call.
+        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    };
+    Err(Error { status, message })
+}
+
+/// A CoreML-backed model that carries ANE-resident state (e.g. a KV cache).
+///
+/// This is a separate backend from [`Model`]: state ops cannot compile through
+/// the private `_ANE` path, so this goes through `CoreML`'s `MLModel` →
+/// `MLE5Engine` / `E5RT`, which keeps the state on the Neural Engine across calls.
+/// Only the (small) inputs/outputs cross the host boundary per
+/// [`Self::predict`]; the state never does. Needs no ANE entitlement.
+pub struct StateModel {
+    /// Owning FFI handle (`MLModel`).
+    raw: *mut sys::AneStateModel,
+}
+
+// SAFETY: `MLModel` is documented thread-safe for predictions; the handle owns
+// no thread-affine state of ours. Not `Sync` — concurrent `predict` on one
+// model would race the shared model object, so callers serialize via `&mut`.
+unsafe impl Send for StateModel {}
+
+/// A resident state buffer (`MLState`) bound to a [`StateModel`] — the KV cache
+/// that lives on the ANE across [`StateModel::predict`] calls.
+pub struct State {
+    /// Owning FFI handle (`MLState`).
+    raw: *mut sys::AneState,
+}
+
+// SAFETY: see [`StateModel`]. `predict` takes `&mut State`, so in-place updates
+// are exclusively borrowed; the handle is safe to move between threads.
+unsafe impl Send for State {}
+
+impl core::fmt::Debug for StateModel {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StateModel").finish_non_exhaustive()
+    }
+}
+
+impl core::fmt::Debug for State {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("State").finish_non_exhaustive()
+    }
+}
+
+impl StateModel {
+    /// Open a compiled `.mlmodelc` (or `.mlpackage`) that declares state,
+    /// pinned to CPU+ANE.
+    ///
+    /// # Panics
+    /// Panics if `path` contains a NUL byte.
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::Compile`] if a `.mlpackage` fails to compile,
+    /// [`sys::AneStatus::Load`] if the model fails to load.
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let c = path_to_cstring(path.as_ref());
+        let mut raw: *mut sys::AneStateModel = core::ptr::null_mut();
+        // SAFETY: `c` lives for the call; `raw` is written on success.
+        let status = unsafe { sys::ane_state_model_open(c.as_ptr(), &raw mut raw) };
+        state_check(status)?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "ane_state_model_open returned OK but null handle".into(),
+            });
+        }
+        Ok(Self { raw })
+    }
+
+    /// Sorted input feature names.
+    #[must_use]
+    pub fn input_names(&self) -> Vec<String> {
+        // SAFETY: `self.raw` is live; `num`/`name` are bounds-checked in C.
+        let num = unsafe { sys::ane_state_model_num_inputs(self.raw) };
+        (0..num)
+            .filter_map(|i| {
+                // SAFETY: `i` in `[0, num)`; returns a borrowed C string or null.
+                let p = unsafe { sys::ane_state_model_input_name(self.raw, i) };
+                (!p.is_null()).then(|| {
+                    // SAFETY: non-null borrowed NUL-terminated name owned by the model.
+                    unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+                })
+            })
+            .collect()
+    }
+
+    /// Sorted output feature names.
+    #[must_use]
+    pub fn output_names(&self) -> Vec<String> {
+        // SAFETY: as in `input_names`.
+        let num = unsafe { sys::ane_state_model_num_outputs(self.raw) };
+        (0..num)
+            .filter_map(|i| {
+                // SAFETY: `i` in `[0, num)`.
+                let p = unsafe { sys::ane_state_model_output_name(self.raw, i) };
+                (!p.is_null())
+                    // SAFETY: non-null borrowed name owned by the model.
+                    .then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+
+    /// Sorted state (e.g. KV-cache) buffer names.
+    #[must_use]
+    pub fn state_names(&self) -> Vec<String> {
+        // SAFETY: as in `input_names`.
+        let num = unsafe { sys::ane_state_model_num_states(self.raw) };
+        (0..num)
+            .filter_map(|i| {
+                // SAFETY: `i` in `[0, num)`.
+                let p = unsafe { sys::ane_state_model_state_name(self.raw, i) };
+                (!p.is_null())
+                    // SAFETY: non-null borrowed name owned by the model.
+                    .then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+
+    /// Declared element count for a named input (0 if unknown).
+    ///
+    /// # Panics
+    /// Panics if `name` contains a NUL byte.
+    #[must_use]
+    #[expect(
+        clippy::expect_used,
+        reason = "a NUL in a feature name is a programmer error and is documented to panic"
+    )]
+    pub fn input_count(&self, name: &str) -> usize {
+        let c = CString::new(name).expect("input name contains NUL");
+        // SAFETY: `self.raw` live; `c` lives for the call.
+        unsafe { sys::ane_state_model_input_count(self.raw, c.as_ptr()) }
+    }
+
+    /// Declared element count for a named output (0 if unknown).
+    ///
+    /// # Panics
+    /// Panics if `name` contains a NUL byte.
+    #[must_use]
+    #[expect(
+        clippy::expect_used,
+        reason = "a NUL in a feature name is a programmer error and is documented to panic"
+    )]
+    pub fn output_count(&self, name: &str) -> usize {
+        let c = CString::new(name).expect("output name contains NUL");
+        // SAFETY: `self.raw` live; `c` lives for the call.
+        unsafe { sys::ane_state_model_output_count(self.raw, c.as_ptr()) }
+    }
+
+    /// Allocate a fresh resident state (e.g. a zeroed KV cache) for this model.
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::Internal`] if the framework returns no state object.
+    pub fn new_state(&self) -> Result<State> {
+        let mut raw: *mut sys::AneState = core::ptr::null_mut();
+        // SAFETY: `self.raw` live; `raw` written on success.
+        let status = unsafe { sys::ane_state_create(self.raw, &raw mut raw) };
+        state_check(status)?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "ane_state_create returned OK but null handle".into(),
+            });
+        }
+        Ok(State { raw })
+    }
+
+    /// Run one inference step using the resident `state`, binding `inputs` and
+    /// filling `outputs` by name (flat row-major f32, converted to/from the
+    /// model's dtype). The state is read and updated in place on the ANE — its
+    /// contents never cross the host boundary.
+    ///
+    /// # Panics
+    /// Panics if any feature name contains a NUL byte.
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::InvalidArg`] if a name is unknown or a buffer length
+    /// differs from the model's declared count; [`sys::AneStatus::Eval`] if the
+    /// prediction fails.
+    #[expect(
+        clippy::expect_used,
+        reason = "a NUL in a feature name is a programmer error and is documented to panic"
+    )]
+    pub fn predict(
+        &self,
+        state: &mut State,
+        inputs: &[(&str, &[f32])],
+        outputs: &mut [(&str, &mut [f32])],
+    ) -> Result<()> {
+        // Field access (`.0`/`.1`) rather than tuple-pattern closures keeps the
+        // `pattern_type_mismatch` restriction lint happy on the borrowed pairs.
+        let in_names: Vec<CString> = inputs
+            .iter()
+            .map(|pair| CString::new(pair.0).expect("input name contains NUL"))
+            .collect();
+        let out_names: Vec<CString> = outputs
+            .iter()
+            .map(|pair| CString::new(pair.0).expect("output name contains NUL"))
+            .collect();
+        let in_name_ptrs: Vec<*const c_char> = in_names.iter().map(|c| c.as_ptr()).collect();
+        let in_data_ptrs: Vec<*const f32> = inputs.iter().map(|pair| pair.1.as_ptr()).collect();
+        let in_counts: Vec<usize> = inputs.iter().map(|pair| pair.1.len()).collect();
+        let out_name_ptrs: Vec<*const c_char> = out_names.iter().map(|c| c.as_ptr()).collect();
+        let out_counts: Vec<usize> = outputs.iter().map(|pair| pair.1.len()).collect();
+        let mut out_data_ptrs: Vec<*mut f32> =
+            outputs.iter_mut().map(|pair| pair.1.as_mut_ptr()).collect();
+
+        let n_in = i32::try_from(inputs.len()).map_err(|_too_many| Error {
+            status: sys::AneStatus::InvalidArg,
+            message: "too many inputs".into(),
+        })?;
+        let n_out = i32::try_from(outputs.len()).map_err(|_too_many| Error {
+            status: sys::AneStatus::InvalidArg,
+            message: "too many outputs".into(),
+        })?;
+
+        // SAFETY: every pointer array has the matching length passed alongside
+        // it; each `in_data[k]`/`out_data[k]` is valid for `*_counts[k]` f32s
+        // for the duration of the call (borrowed from `inputs`/`outputs`).
+        // `self.raw` and `state.raw` are live owning handles.
+        let status = unsafe {
+            sys::ane_state_predict_f32(
+                self.raw,
+                state.raw,
+                in_name_ptrs.as_ptr(),
+                in_data_ptrs.as_ptr(),
+                in_counts.as_ptr(),
+                n_in,
+                out_name_ptrs.as_ptr(),
+                out_data_ptrs.as_mut_ptr(),
+                out_counts.as_ptr(),
+                n_out,
+            )
+        };
+        state_check(status)
+    }
+}
+
+impl Drop for StateModel {
+    fn drop(&mut self) {
+        // SAFETY: `self.raw` came from `ane_state_model_open` and is dropped once.
+        unsafe { sys::ane_state_model_close(self.raw) };
+    }
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        // SAFETY: `self.raw` came from `ane_state_create` and is dropped once.
+        unsafe { sys::ane_state_release(self.raw) };
+    }
 }

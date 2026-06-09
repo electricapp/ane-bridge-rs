@@ -138,6 +138,45 @@ out_ref.with_locked(ane_bridge::BufferAccess::Read, |bytes| {
 })?;
 ```
 
+### Resident state (MLState)
+
+A MIL program can declare state tensors that stay on the ANE across
+evaluations. A state buffer is bound once and updated in place by the
+program's `read_state` / `coreml.update_state` ops — it never crosses the
+host boundary per call, so a streaming cache stays resident instead of
+being shipped in and out every submit.
+
+```rust
+let mut req = model.request()?;
+let cache = model.state_buffer(0)?;   // zeroed, sized for state slot 0
+req.bind_state(0, cache)?;            // persists + updates in place across submits
+req.bind_input(0, x)?;
+req.run(QoS::Default)?;               // state survives into the next run
+```
+
+Bind every input, output, and state before the first submit. Initialize the
+state buffer before the first run. The buffer must outlive the request.
+
+> Note: the schema surface (`Model::num_states` / `state` / `state_nbytes` /
+> `state_buffer`) is live, but `bind_state` on this `_ANE` path returns
+> `Unsupported`: state ops do not compile through the private `_ANEModel` path
+> on current macOS (`ANECCompile` rejects them). For working ANE-resident
+> state, use the CoreML-backed `StateModel` below.
+
+### Stateful inference via `StateModel` (CoreML-backed)
+
+For models that declare state, `StateModel` drives CoreML's `MLModel` +
+`MLState` — the MLE5Engine / E5RT path that keeps the state resident on the
+Neural Engine across calls and needs no ANE entitlement. Only the (small)
+named inputs/outputs cross the host boundary per step; the state never does.
+
+```rust
+let m = StateModel::open("model.mlmodelc")?;      // a model declaring state
+let mut state = m.new_state()?;                   // KV cache, resident on the ANE
+let mut y = vec![0.0_f32; m.output_count("y")];
+m.predict(&mut state, &[("x", &x)], &mut [("y", &mut y)])?; // state updates in place
+```
+
 ## Async
 
 `submit` is non-blocking. Multiple `Request` objects can overlap
@@ -179,6 +218,9 @@ sources via the `cc` crate.
 | `ane_request_create`                     | `Model::request`                                                |
 | `ane_request_bind_input/output`          | `Request::bind_input/output` (take `Buffer` by value)           |
 | —                                        | `Request::input_buffer_mut` / `output_buffer_mut`               |
+| `ane_model_num_states`/`state_spec/_nbytes` | `Model::num_states`, `Model::state(idx)`, `Model::state_nbytes` |
+| `ane_buffer_create_for_state`            | `Model::state_buffer`                                          |
+| `ane_request_bind_state`                 | `Request::bind_state` (take `Buffer` by value)                 |
 | `ane_request_set/get_*_bytes`            | `Request::set_input_bytes`, `get_output_bytes`                  |
 | `ane_request_submit` / `wait` / `run`    | `Request::submit` / `wait` / `run`                              |
 | `ane_request_submit` + async glue        | `Request::submit_async` → `impl Future<Output=Result<()>>`      |

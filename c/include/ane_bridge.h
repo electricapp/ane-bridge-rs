@@ -230,6 +230,43 @@ AneStatus ane_request_set_completion(AneRequest* req, AneCompletionFn fn, void* 
 const char* ane_request_last_error(const AneRequest* req);
 
 /* =====================================================================
+ * Resident state (MLState)
+ *
+ * A MIL program may declare state tensors that live on the ANE and
+ * persist across evaluations. Unlike an input/output, a bound state
+ * buffer is read and updated in place by the program's read_state /
+ * coreml.update_state ops and never crosses the host boundary per call --
+ * so a streaming cache stays engine-resident instead of being shipped in
+ * and out every submit.
+ *
+ * Lifecycle: bind a persistent, caller-owned buffer to a state slot once.
+ * Its contents survive every submit on the request until it is rebound or
+ * the request is released. Initialize it (e.g. zero) before the first
+ * submit. The buffer must outlive the request (same rule as bind_input).
+ *
+ * A state slot is NOT an input or output: it does not count against
+ * num_inputs / num_outputs and is bound through bind_state, not
+ * bind_input. All inputs, outputs, AND states must be bound before submit.
+ * ===================================================================== */
+
+int32_t ane_model_num_states(const AneModel* model);
+const AneTensorSpec* ane_model_state_spec(const AneModel* model, int32_t idx);
+size_t ane_model_state_nbytes(const AneModel* model, int32_t idx);
+
+/* Convenience: IOSurface buffer sized for state slot idx. */
+AneStatus ane_buffer_create_for_state(const AneModel* model, int32_t idx, AneBuffer** out);
+
+/* Bind a persistent buffer to state slot idx. Persists + updates in place
+ * across submits. */
+AneStatus ane_request_bind_state(AneRequest* req, int32_t idx, AneBuffer* buf);
+
+/* Per-procedure variants, mirroring the multi-procedure I/O accessors. */
+int32_t ane_model_num_states_for_procedure(const AneModel* model, int32_t proc_idx);
+const AneTensorSpec* ane_model_state_spec_for_procedure(const AneModel* model, int32_t proc_idx,
+                                                        int32_t idx);
+size_t ane_model_state_nbytes_for_procedure(const AneModel* model, int32_t proc_idx, int32_t idx);
+
+/* =====================================================================
  * Version
  * ===================================================================== */
 
@@ -573,6 +610,56 @@ AnePerfStats* ane_request_perf_stats_at(const AneRequest* req, int32_t idx);
  * with `free()`. */
 AneStatus ane_decompress_weights(const void* compressed, size_t cn, void** out_bytes,
                                  size_t* out_nbytes);
+
+/* =====================================================================
+ * Stateful inference (CoreML MLModel + MLState) — ANE-resident state
+ *
+ * A SEPARATE backend from everything above. Models that declare state
+ * (read_state / coreml_update_state — e.g. a KV cache) cannot compile through
+ * the private _ANE path (ANECCompile rejects state ops); they go through
+ * CoreML, which builds the MLE5Engine / E5RT execution stream that keeps the
+ * state resident on the ANE across calls. Only the (small) inputs/outputs
+ * cross the host<->device boundary per step — the state never does — and the
+ * path needs no ANE entitlement. Backed by ane_state.m (links CoreML).
+ * ===================================================================== */
+
+typedef struct AneStateModel AneStateModel; /* wraps MLModel */
+typedef struct AneState AneState;           /* wraps MLState (resident KV cache) */
+
+/* Open a compiled `.mlmodelc` (or `.mlpackage`, compiled on the fly) that
+ * declares one or more state buffers. Pinned to CPU+ANE. */
+AneStatus ane_state_model_open(const char* model_url, AneStateModel** out_model);
+void ane_state_model_close(AneStateModel* m);
+
+/* Schema. Names are stable, sorted, and owned by the model handle. */
+int32_t ane_state_model_num_inputs(const AneStateModel* m);
+int32_t ane_state_model_num_outputs(const AneStateModel* m);
+int32_t ane_state_model_num_states(const AneStateModel* m);
+const char* ane_state_model_input_name(const AneStateModel* m, int32_t i);  /* NULL if oob */
+const char* ane_state_model_output_name(const AneStateModel* m, int32_t i); /* NULL if oob */
+const char* ane_state_model_state_name(const AneStateModel* m, int32_t i);  /* NULL if oob */
+
+/* Declared element count for a named input/output (product of dims; 0 if
+ * unknown). Use to size the flat f32 buffers passed to predict. */
+size_t ane_state_model_input_count(const AneStateModel* m, const char* name);
+size_t ane_state_model_output_count(const AneStateModel* m, const char* name);
+
+/* Allocate a fresh resident state (e.g. a zeroed KV cache) for this model. */
+AneStatus ane_state_create(AneStateModel* m, AneState** out_state);
+void ane_state_release(AneState* s);
+
+/* One inference step using the resident state. Inputs/outputs are bound by
+ * name to flat row-major f32 buffers (the library converts to/from the
+ * model's declared dtype). Counts must equal the model's declared element
+ * counts. The state is read and updated in place on the ANE and is never
+ * copied across the host boundary. */
+AneStatus ane_state_predict_f32(AneStateModel* m, AneState* s, const char* const* in_names,
+                                const float* const* in_data, const size_t* in_counts, int32_t n_in,
+                                const char* const* out_names, float* const* out_data,
+                                const size_t* out_counts, int32_t n_out);
+
+/* Most recent error on this thread from an ane_state_* call, or NULL. */
+const char* ane_state_last_error(void);
 
 /* =====================================================================
  * Internal test hooks (NOT part of the stable API)

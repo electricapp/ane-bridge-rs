@@ -227,6 +227,15 @@ AneStatus ane_buffer_create_for_output(const AneModel* m, int32_t idx, AneBuffer
     return ane_buffer_create(n, out);
 }
 
+AneStatus ane_buffer_create_for_state(const AneModel* m, int32_t idx, AneBuffer** out) {
+    clear_last_error();
+    size_t n = ane_model_state_nbytes(m, idx);
+    if (n == 0) {
+        return ANE_ERR_INVALID_ARG;
+    }
+    return ane_buffer_create(n, out);
+}
+
 void ane_buffer_release(AneBuffer* b) {
     if (!b) {
         return;
@@ -291,10 +300,13 @@ typedef struct {
 typedef struct ProcSpecs {
     int32_t num_inputs;
     int32_t num_outputs;
+    int32_t num_states;
     OwnedSpec* input_specs;
     OwnedSpec* output_specs;
+    OwnedSpec* state_specs;
     AneTensorSpec* input_view;
     AneTensorSpec* output_view;
+    AneTensorSpec* state_view;
 } ProcSpecs;
 
 struct AneModel {
@@ -344,6 +356,14 @@ struct AneModel {
     AneTensorSpec* input_view;
     AneTensorSpec* output_view;
 
+    /* Resident state tensors (MLState). A third tensor category alongside
+     * inputs/outputs; populated once the framework's state list is parsed.
+     * A model with no states reports 0 cleanly —
+     * `calloc` zeroes these. */
+    int32_t num_states;
+    OwnedSpec* state_specs;
+    AneTensorSpec* state_view;
+
     int32_t num_procedures;
     ProcSpecs* extra_procs; /* length = num_procedures - 1 (procs 1..N) */
 };
@@ -356,8 +376,10 @@ static void free_proc_specs(ProcSpecs* p) {
     }
     free_owned_specs(p->input_specs, p->num_inputs);
     free_owned_specs(p->output_specs, p->num_outputs);
+    free_owned_specs(p->state_specs, p->num_states);
     free(p->input_view);
     free(p->output_view);
+    free(p->state_view);
 }
 
 static void free_owned_specs(OwnedSpec* specs, int32_t n) {
@@ -913,8 +935,10 @@ void ane_model_close(AneModel* m) {
         }
         free_owned_specs(m->input_specs, m->num_inputs);
         free_owned_specs(m->output_specs, m->num_outputs);
+        free_owned_specs(m->state_specs, m->num_states);
         free(m->input_view);
         free(m->output_view);
+        free(m->state_view);
         if (m->extra_procs) {
             int32_t n_extra = m->num_procedures > 0 ? m->num_procedures - 1 : 0;
             for (int32_t i = 0; i < n_extra; i++) {
@@ -958,6 +982,22 @@ size_t ane_model_output_nbytes(const AneModel* m, int32_t i) {
     return m->output_specs[i].nbytes;
 }
 
+int32_t ane_model_num_states(const AneModel* m) {
+    return m ? m->num_states : 0;
+}
+const AneTensorSpec* ane_model_state_spec(const AneModel* m, int32_t i) {
+    if (!m || i < 0 || i >= m->num_states) {
+        return NULL;
+    }
+    return &m->state_view[i];
+}
+size_t ane_model_state_nbytes(const AneModel* m, int32_t i) {
+    if (!m || i < 0 || i >= m->num_states) {
+        return 0;
+    }
+    return m->state_specs[i].nbytes;
+}
+
 bool ane_model_was_cached(const AneModel* m) {
     return m ? m->cache_hit : false;
 }
@@ -975,6 +1015,12 @@ struct AneRequest {
     AneBuffer** output_bound; /* num_outputs */
     AneBuffer** input_owned;
     AneBuffer** output_owned;
+
+    /* Resident state bindings — one entry per state slot. A state is
+     * always externally bound (a resident cache is meaningless as a
+     * per-call fast-path copy), so there is no `state_owned` array. The
+     * bound buffer persists and is updated in place across submits. */
+    AneBuffer** state_bound; /* num_states */
 
     /* Cached index arrays (`@[@0, @1, …]`) handed to `_ANERequest`'s
      * inputIndices:/outputIndices: slots. They depend only on the
@@ -1035,7 +1081,10 @@ AneStatus ane_request_create(AneModel* m, AneRequest** out) {
         (AneBuffer**)calloc((size_t)(m->num_inputs > 0 ? m->num_inputs : 1), sizeof(AneBuffer*));
     r->output_owned =
         (AneBuffer**)calloc((size_t)(m->num_outputs > 0 ? m->num_outputs : 1), sizeof(AneBuffer*));
-    if (!r->input_bound || !r->output_bound || !r->input_owned || !r->output_owned) {
+    r->state_bound =
+        (AneBuffer**)calloc((size_t)(m->num_states > 0 ? m->num_states : 1), sizeof(AneBuffer*));
+    if (!r->input_bound || !r->output_bound || !r->input_owned || !r->output_owned ||
+        !r->state_bound) {
         ane_request_release(r);
         set_last_error("oom");
         return ANE_ERR_OOM;
@@ -1079,6 +1128,8 @@ void ane_request_release(AneRequest* r) {
     }
     free((void*)r->input_bound);
     free((void*)r->output_bound);
+    /* state_bound holds external (unowned) refs, like input_bound. */
+    free((void*)r->state_bound);
     if (r->idx_in_arr) {
         [r->idx_in_arr release];
     }
@@ -1125,6 +1176,20 @@ AneStatus ane_request_bind_output(AneRequest* r, int32_t i, AneBuffer* b) {
     }
     r->output_bound[i] = b;
     return ANE_OK;
+}
+
+AneStatus ane_request_bind_state(AneRequest* r, int32_t i, AneBuffer* b) {
+    clear_last_error();
+    /* The whole surface (struct fields, accessors, request slot) is in
+     * place, but the two private-framework unknowns that actually place a
+     * state IOSurface on `_ANERequest` are not yet reverse-engineered.
+     * Fail loudly rather than silently no-op: a no-op would make the
+     * resident cache silently wrong (stale state) instead of unsupported. */
+    (void)r;
+    (void)i;
+    (void)b;
+    set_last_error("state binding not yet wired");
+    return ANE_ERR_UNSUPPORTED;
 }
 
 static AneBuffer* ensure_owned_input(AneRequest* r, int32_t i) {
@@ -2026,10 +2091,13 @@ static const ProcSpecs* proc_at(const AneModel* m, int32_t p) {
         static __thread ProcSpecs tls;
         tls.num_inputs = m->num_inputs;
         tls.num_outputs = m->num_outputs;
+        tls.num_states = m->num_states;
         tls.input_specs = m->input_specs;
         tls.output_specs = m->output_specs;
+        tls.state_specs = m->state_specs;
         tls.input_view = m->input_view;
         tls.output_view = m->output_view;
+        tls.state_view = m->state_view;
         return &tls;
     }
     if (p - 1 >= (m->num_procedures > 0 ? m->num_procedures - 1 : 0)) {
@@ -2073,6 +2141,25 @@ size_t ane_model_output_nbytes_for_procedure(const AneModel* m, int32_t p, int32
         return 0;
     }
     return ps->output_specs[i].nbytes;
+}
+
+int32_t ane_model_num_states_for_procedure(const AneModel* m, int32_t p) {
+    const ProcSpecs* ps = proc_at(m, p);
+    return ps ? ps->num_states : 0;
+}
+const AneTensorSpec* ane_model_state_spec_for_procedure(const AneModel* m, int32_t p, int32_t i) {
+    const ProcSpecs* ps = proc_at(m, p);
+    if (!ps || i < 0 || i >= ps->num_states) {
+        return NULL;
+    }
+    return &ps->state_view[i];
+}
+size_t ane_model_state_nbytes_for_procedure(const AneModel* m, int32_t p, int32_t i) {
+    const ProcSpecs* ps = proc_at(m, p);
+    if (!ps || i < 0 || i >= ps->num_states) {
+        return 0;
+    }
+    return ps->state_specs[i].nbytes;
 }
 
 int32_t ane_model_queue_depth(const AneModel* m) {
