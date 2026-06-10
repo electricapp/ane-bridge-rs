@@ -3714,6 +3714,61 @@ impl E5rtBuffer<'_> {
         if rc == 0 { out } else { ptr::null_mut() }
     }
 
+    /// Copy `src` into the start of this buffer's host memory, returning the
+    /// bytes written, or `None` if the buffer is not host-visible
+    /// ([`Self::data_ptr`] null) or smaller than `src`.
+    ///
+    /// Safe for host-backed buffers (e.g. [`StateModel::alloc_buffer`]); the
+    /// bytes are copied verbatim, so the caller picks the on-device layout.
+    #[must_use]
+    pub fn write_bytes(&self, src: &[u8]) -> Option<usize> {
+        let dst = self.data_ptr();
+        if dst.is_null() || self.size() < src.len() {
+            return None;
+        }
+        // SAFETY: `dst` is host-visible for `size() >= src.len()` bytes (just
+        // checked); `src` is valid for its length; regions do not overlap.
+        unsafe { ptr::copy_nonoverlapping(src.as_ptr(), dst.cast::<u8>(), src.len()) };
+        Some(src.len())
+    }
+
+    /// Copy the first `dst.len()` bytes of this buffer's host memory into `dst`,
+    /// returning the bytes read, or `None` if not host-visible / too small.
+    #[must_use]
+    pub fn read_bytes(&self, dst: &mut [u8]) -> Option<usize> {
+        let src = self.data_ptr();
+        if src.is_null() || self.size() < dst.len() {
+            return None;
+        }
+        // SAFETY: `src` is host-visible for `size() >= dst.len()` bytes; `dst`
+        // is valid for its length; regions do not overlap.
+        unsafe { ptr::copy_nonoverlapping(src.cast::<u8>(), dst.as_mut_ptr(), dst.len()) };
+        Some(dst.len())
+    }
+
+    /// Write an `f32` slice into the buffer (native byte layout — matches an
+    /// fp32 ANE tensor). `None` if not host-visible / too small. Convenience
+    /// over [`Self::write_bytes`].
+    #[must_use]
+    pub fn write_f32(&self, src: &[f32]) -> Option<usize> {
+        let len = src.len().checked_mul(core::mem::size_of::<f32>())?;
+        // SAFETY: `f32` has no padding/invalid bit patterns; reading its bytes
+        // is always valid, and the slice covers exactly `len` bytes of `src`.
+        let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr().cast::<u8>(), len) };
+        self.write_bytes(bytes)
+    }
+
+    /// Read into an `f32` slice from the buffer (native byte layout). `None` if
+    /// not host-visible / too small. Convenience over [`Self::read_bytes`].
+    #[must_use]
+    pub fn read_f32(&self, dst: &mut [f32]) -> Option<usize> {
+        let len = dst.len().checked_mul(core::mem::size_of::<f32>())?;
+        // SAFETY: `f32` accepts any bit pattern; the slice covers exactly `len`
+        // bytes of `dst`, which we then fill from the buffer.
+        let bytes = unsafe { core::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<u8>(), len) };
+        self.read_bytes(bytes)
+    }
+
     /// The raw `e5rt_buffer_object` handle, for driving the rest of the
     /// `e5rt_*` C-ABI (e.g. binding it as a stream I/O port). Borrowed — do
     /// not release; the [`E5rtBuffer`] owns it.

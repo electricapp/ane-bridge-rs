@@ -607,12 +607,9 @@ fn e5rt_runner_drives_inference() {
     let mut runner = m.e5rt_runner().expect("build runner");
     let inbuf = m.alloc_buffer(256).expect("alloc input buffer");
     let outbuf = m.alloc_buffer(256).expect("alloc output buffer");
-    assert!(
-        !inbuf.data_ptr().is_null() && !outbuf.data_ptr().is_null(),
-        "alloc'd buffers must be host-visible"
-    );
-    // SAFETY: `inbuf` is a host-visible alloc'd buffer of 256 bytes (>= 4).
-    unsafe { *inbuf.data_ptr().cast::<f32>() = 1.0 };
+    inbuf
+        .write_f32(&[1.0])
+        .expect("write input (host-visible buffer)");
 
     let mut prev: Option<f32> = None;
     for step in 0..4 {
@@ -622,8 +619,9 @@ fn e5rt_runner_drives_inference() {
                 &[(out_port.as_str(), &outbuf)],
             )
             .expect("drive inference");
-        // SAFETY: `outbuf` holds the scalar fp32 output after a successful drive.
-        let got = unsafe { *outbuf.data_ptr().cast::<f32>() };
+        let mut out_val = [0.0_f32];
+        outbuf.read_f32(&mut out_val).expect("read output");
+        let got = out_val[0];
         if let Some(p) = prev {
             assert!(
                 (got - p - 1.0).abs() < 1e-3,
@@ -686,16 +684,16 @@ fn e5rt_drive_and_predict_share_state() {
     let mut runner = m.e5rt_runner().expect("runner");
     let inbuf = m.alloc_buffer(256).expect("input buffer");
     let outbuf = m.alloc_buffer(256).expect("output buffer");
-    // SAFETY: host-visible alloc'd buffer of 256 bytes (>= 4).
-    unsafe { *inbuf.data_ptr().cast::<f32>() = 1.0 };
+    inbuf.write_f32(&[1.0]).expect("write input");
     runner
         .execute(
             &[(in_port.as_str(), &inbuf)],
             &[(out_port.as_str(), &outbuf)],
         )
         .expect("drive");
-    // SAFETY: scalar fp32 output after a successful drive.
-    let drive_out = unsafe { *outbuf.data_ptr().cast::<f32>() };
+    let mut drive_arr = [0.0_f32];
+    outbuf.read_f32(&mut drive_arr).expect("read drive output");
+    let drive_out = drive_arr[0];
 
     // predict #2 with the SAME state: must still work AND see the drive's update.
     let mut o2 = [0.0_f32];

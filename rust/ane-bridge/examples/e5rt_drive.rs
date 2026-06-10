@@ -119,8 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut runner = m.e5rt_runner()?;
     let inbuf = m.alloc_buffer(256)?;
     let outbuf = m.alloc_buffer(256)?;
-    // SAFETY: host-visible alloc'd buffer of 256 bytes (>= 4).
-    unsafe { *inbuf.data_ptr().cast::<f32>() = 0.0 };
+    inbuf.write_f32(&[0.0]).expect("write input buffer");
 
     // ---- time CoreML predict ----
     for _ in 0..WARMUP {
