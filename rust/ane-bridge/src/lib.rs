@@ -3476,6 +3476,29 @@ fn e5rt_check(rc: sys::espresso::E5rtErrorCode, what: &str) -> Result<()> {
     })
 }
 
+/// E5RT surface format for a `CVPixelBuffer` `OSType` 4CC (e.g. `'BGRA'` ==
+/// `0x4247_5241` maps to `2`), or `None` if the framework does not recognize
+/// it. A pure lookup — needs no warm runtime.
+#[must_use]
+pub fn surface_format_for_fourcc(fourcc: u32) -> Option<u32> {
+    let mut out: u32 = 0;
+    // SAFETY: `out` is a writable `u32`; the converter is a cold-safe pure
+    // lookup that writes four bytes.
+    let rc = unsafe { sys::espresso::e5rt_cvpb_4cc_to_surface_format(fourcc, &raw mut out) };
+    (rc == 0).then_some(out)
+}
+
+/// `CVPixelBuffer` `OSType` 4CC for an E5RT surface format, or `None` if
+/// unrecognized. Inverse of [`surface_format_for_fourcc`]; needs no warm
+/// runtime.
+#[must_use]
+pub fn fourcc_for_surface_format(format: u32) -> Option<u32> {
+    let mut out: u32 = 0;
+    // SAFETY: `out` is a writable `u32`; cold-safe pure lookup.
+    let rc = unsafe { sys::espresso::e5rt_surface_format_to_cvpb_4cc(format, &raw mut out) };
+    (rc == 0).then_some(out)
+}
+
 /// A zero-copy E5RT buffer object.
 ///
 /// Wraps an existing `IOSurface` / `MTLBuffer` / host region, or freshly

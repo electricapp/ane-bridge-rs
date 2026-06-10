@@ -96,6 +96,13 @@ pub type StreamConfigOptions = *mut c_void;
 /// accessors.
 pub type GpuDevice = *mut c_void;
 
+/// Opaque `e5rt_surface_object` handle.
+///
+/// An `IOSurface`-backed object distinct from [`BufferObject`] — the surface
+/// variant an `e5rt_io_port` can bind. Touch only through the
+/// `e5rt_surface_object_*` accessors.
+pub type SurfaceObject = *mut c_void;
+
 unsafe extern "C" {
     // ----- Context -----
 
@@ -776,4 +783,133 @@ unsafe extern "C" {
     /// # Safety
     /// `device` must be a live compute GPU device, released exactly once.
     pub fn e5rt_compute_gpu_device_release(device: GpuDevice) -> E5rtErrorCode;
+
+    // ----- E5RT memory objects (aliases of buffer objects) -----
+    //
+    // Verified by disassembly: every `e5rt_memory_object_*` is a tail-call
+    // alias of the matching `e5rt_buffer_object_*` (e.g. `memory_object_create`
+    // jumps straight to `buffer_object_alloc`). Same handles, signatures, and
+    // warm-runtime requirement — so they use [`BufferObject`]. Bound for
+    // name-completeness; prefer the `buffer_object` names / the safe
+    // `E5rtBuffer`. (`memory_object_create_as_alias` is omitted, mirroring the
+    // unbound `buffer_object_create_as_alias`.)
+
+    /// Alias of [`e5rt_buffer_object_alloc`].
+    /// # Safety
+    /// As [`e5rt_buffer_object_alloc`].
+    pub fn e5rt_memory_object_create(
+        out: *mut BufferObject,
+        size: usize,
+        buffer_type: u32,
+    ) -> E5rtErrorCode;
+    /// Alias of [`e5rt_buffer_object_create_from_iosurface`].
+    /// # Safety
+    /// As [`e5rt_buffer_object_create_from_iosurface`].
+    pub fn e5rt_memory_object_create_from_iosurface(
+        out: *mut BufferObject,
+        surface: *mut c_void,
+    ) -> E5rtErrorCode;
+    /// Alias of [`e5rt_buffer_object_get_data_ptr`].
+    /// # Safety
+    /// As [`e5rt_buffer_object_get_data_ptr`].
+    pub fn e5rt_memory_object_get_data_ptr(
+        obj: BufferObject,
+        out: *mut *mut c_void,
+    ) -> E5rtErrorCode;
+    /// Alias of [`e5rt_buffer_object_get_iosurface`].
+    /// # Safety
+    /// As [`e5rt_buffer_object_get_iosurface`].
+    pub fn e5rt_memory_object_get_iosurface(
+        obj: BufferObject,
+        out: *mut *mut c_void,
+    ) -> E5rtErrorCode;
+    /// Alias of [`e5rt_buffer_object_get_size`].
+    /// # Safety
+    /// As [`e5rt_buffer_object_get_size`].
+    pub fn e5rt_memory_object_get_size(obj: BufferObject, out: *mut usize) -> E5rtErrorCode;
+    /// Alias of [`e5rt_buffer_object_release`].
+    /// # Safety
+    /// As [`e5rt_buffer_object_release`].
+    pub fn e5rt_memory_object_release(obj: BufferObject) -> E5rtErrorCode;
+
+    // ----- E5RT surface objects (IOSurface-backed, for io_port binding) -----
+    //
+    // A distinct object class (not a buffer alias). `create_from_iosurface` /
+    // `get_iosurface` / `release` verified by calling: the wrapped surface
+    // round-trips; needs a warm runtime (it is an `ANEMemoryProvider`).
+    //
+    // Unlike `buffer_object_create_from_iosurface`, the surface must be a real
+    // pixel surface (verified with a BGRA `IOSurface`). A plain byte surface —
+    // such as the bridge's `ane_buffer_create` allocation (width = nbytes,
+    // 1 byte/element, no pixel format) — is rejected with code `1`
+    // (`INVALID FUNCTION ARGUMENT`). No safe wrapper is provided for that reason
+    // (the bridge has no pixel-surface source yet); call these directly with a
+    // compatible `IOSurfaceRef`.
+
+    /// Wrap an `IOSurfaceRef` as a surface object (out-first). Verified.
+    ///
+    /// # Safety
+    /// `out` must be writable; `surface` a live `IOSurfaceRef`; runtime warm.
+    /// Release with [`e5rt_surface_object_release`].
+    pub fn e5rt_surface_object_create_from_iosurface(
+        out: *mut SurfaceObject,
+        surface: *mut c_void,
+    ) -> E5rtErrorCode;
+
+    /// Top-level variant of [`e5rt_surface_object_create_from_iosurface`] (same
+    /// body / signature).
+    ///
+    /// # Safety
+    /// As [`e5rt_surface_object_create_from_iosurface`].
+    pub fn e5rt_create_surface_object_from_iosurface(
+        out: *mut SurfaceObject,
+        surface: *mut c_void,
+    ) -> E5rtErrorCode;
+
+    /// Write the surface object's backing `IOSurfaceRef` to `*out`.
+    ///
+    /// # Safety
+    /// `obj` must be live; `out` a writable `*mut *mut c_void`.
+    pub fn e5rt_surface_object_get_iosurface(
+        obj: SurfaceObject,
+        out: *mut *mut c_void,
+    ) -> E5rtErrorCode;
+
+    /// Allocate a fresh surface object. The two args past `out` are UNVERIFIED
+    /// (likely a size / descriptor + a format / flag); out-first like the other
+    /// factories.
+    ///
+    /// # Safety
+    /// `out` must be writable; runtime warm. See the unverified-args note.
+    pub fn e5rt_surface_object_alloc(
+        out: *mut SurfaceObject,
+        arg1: u64,
+        arg2: u32,
+    ) -> E5rtErrorCode;
+
+    /// Release a surface object.
+    ///
+    /// # Safety
+    /// `obj` must be a live surface object, released exactly once.
+    pub fn e5rt_surface_object_release(obj: SurfaceObject) -> E5rtErrorCode;
+
+    // ----- E5RT surface format <-> CVPixelBuffer 4CC -----
+    //
+    // Pure converters — verified to work COLD (no warm runtime) and to
+    // round-trip: `'BGRA'` (`0x42475241`) <-> surface format `2`. The format is
+    // a 32-bit value (confirmed with a 64-bit sentinel).
+
+    /// Convert a `CVPixelBuffer` `OSType` 4CC to an E5RT surface format, written
+    /// to `*out_format`.
+    ///
+    /// # Safety
+    /// `out_format` must be a writable `*mut u32`.
+    pub fn e5rt_cvpb_4cc_to_surface_format(fourcc: u32, out_format: *mut u32) -> E5rtErrorCode;
+
+    /// Convert an E5RT surface format to a `CVPixelBuffer` `OSType` 4CC, written
+    /// to `*out_fourcc`.
+    ///
+    /// # Safety
+    /// `out_fourcc` must be a writable `*mut u32`.
+    pub fn e5rt_surface_format_to_cvpb_4cc(format: u32, out_fourcc: *mut u32) -> E5rtErrorCode;
 }

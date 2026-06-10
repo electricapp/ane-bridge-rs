@@ -86,7 +86,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use ane_bridge::{Buffer, StateModel, e5rt_error_string};
+use ane_bridge::{
+    Buffer, StateModel, e5rt_error_string, fourcc_for_surface_format, surface_format_for_fourcc,
+};
 use tempfile::TempDir;
 
 /// Repo root: two levels up from this crate's manifest dir.
@@ -480,4 +482,17 @@ fn e5rt_gpu_device_wraps_mtl_device() {
         "wrapped device handle must be live"
     );
     println!("wrapped MTLDevice round-trips through E5rtGpuDevice");
+}
+
+/// The CVPixelBuffer 4CC <-> E5RT surface-format converters round-trip. Pure
+/// functions — no model or warm runtime, so this always runs.
+#[test]
+fn e5rt_surface_format_fourcc_round_trips() {
+    let bgra: u32 = 0x4247_5241; // 'BGRA'
+    let fmt = surface_format_for_fourcc(bgra).expect("BGRA must map to a surface format");
+    assert_eq!(
+        fourcc_for_surface_format(fmt),
+        Some(bgra),
+        "surface format {fmt} must map back to 'BGRA'"
+    );
 }

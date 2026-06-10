@@ -359,6 +359,46 @@ e5rt_error_code_t e5rt_compute_gpu_device_get_mtl_device(e5rt_compute_gpu_device
                                                          void** out /* id<MTLDevice>* */);
 e5rt_error_code_t e5rt_compute_gpu_device_release(e5rt_compute_gpu_device_t device);
 
+/* Memory objects — aliases of buffer objects.
+ *
+ * VERIFIED by disassembly: every e5rt_memory_object_* tail-calls the matching
+ * e5rt_buffer_object_* (memory_object_create -> buffer_object_alloc, etc.).
+ * Same handle, signature, and warm-runtime requirement. Listed for
+ * completeness; prefer the buffer_object names. (create_as_alias omitted.) */
+e5rt_error_code_t e5rt_memory_object_create(e5rt_buffer_object_t* out, size_t size,
+                                            uint32_t buffer_type);
+e5rt_error_code_t e5rt_memory_object_create_from_iosurface(e5rt_buffer_object_t* out,
+                                                           void* surface /* IOSurfaceRef */);
+e5rt_error_code_t e5rt_memory_object_get_data_ptr(e5rt_buffer_object_t obj, void** out);
+e5rt_error_code_t e5rt_memory_object_get_iosurface(e5rt_buffer_object_t obj, void** out);
+e5rt_error_code_t e5rt_memory_object_get_size(e5rt_buffer_object_t obj, size_t* out);
+e5rt_error_code_t e5rt_memory_object_release(e5rt_buffer_object_t obj);
+
+/* Surface objects — IOSurface-backed, the surface variant an io_port binds.
+ * Distinct from buffer objects. create_from_iosurface / get_iosurface / release
+ * VERIFIED by calling (the surface round-trips; needs a warm runtime).
+ * alloc's two args past out are UNVERIFIED.
+ *
+ * NOTE: unlike buffer_object_create_from_iosurface, the surface must be a real
+ * pixel surface (verified with BGRA). A plain byte IOSurface (e.g. the bridge's
+ * ane_buffer_create allocation) is rejected with code 1 (INVALID FUNCTION
+ * ARGUMENT). */
+typedef void* e5rt_surface_object_t;
+
+e5rt_error_code_t e5rt_surface_object_create_from_iosurface(e5rt_surface_object_t* out,
+                                                            void* surface /* IOSurfaceRef */);
+e5rt_error_code_t e5rt_create_surface_object_from_iosurface(e5rt_surface_object_t* out,
+                                                            void* surface); /* same as above */
+e5rt_error_code_t e5rt_surface_object_get_iosurface(e5rt_surface_object_t obj, void** out);
+e5rt_error_code_t e5rt_surface_object_alloc(e5rt_surface_object_t* out, uint64_t arg1,
+                                            uint32_t arg2); /* arg1/arg2 UNVERIFIED */
+e5rt_error_code_t e5rt_surface_object_release(e5rt_surface_object_t obj);
+
+/* Surface format <-> CVPixelBuffer 4CC. Pure converters, VERIFIED COLD and
+ * round-tripping: 'BGRA' (0x42475241) <-> surface format 2 (a 32-bit value). */
+e5rt_error_code_t e5rt_cvpb_4cc_to_surface_format(uint32_t fourcc, uint32_t* out_format);
+e5rt_error_code_t e5rt_surface_format_to_cvpb_4cc(uint32_t format, uint32_t* out_fourcc);
+
 #ifdef __cplusplus
 }
 #endif
