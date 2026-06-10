@@ -3363,7 +3363,7 @@ impl StateModel {
         // SAFETY: runtime warm; `c` lives for the call; `raw` written on
         // success; flags 0 is the verified option word.
         let rc = unsafe { sys::espresso::e5rt_async_event_create(&raw mut raw, c.as_ptr(), 0) };
-        E5rtEvent::check_e5rt(rc, "e5rt_async_event_create")?;
+        e5rt_check(rc, "e5rt_async_event_create")?;
         if raw.is_null() {
             return Err(Error {
                 status: sys::AneStatus::Internal,
@@ -3374,6 +3374,55 @@ impl StateModel {
             raw,
             _src: core::marker::PhantomData,
         })
+    }
+
+    /// Set the scheduling quality-of-service of this model's borrowed E5RT
+    /// execution stream, influencing how subsequent ANE work on it is
+    /// scheduled. `qos_class` is a Darwin `qos_class_t` (`0x21`
+    /// user-interactive, `0x19` user-initiated, `0x15` default, `0x11` utility,
+    /// `0x09` background).
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::Unsupported`] if the runtime is not warm (predict
+    /// first); [`sys::AneStatus::Internal`] (with the framework message) on
+    /// failure.
+    pub fn set_stream_qos(&self, qos_class: u32) -> Result<()> {
+        let stream = self.e5rt_stream_handle();
+        if stream.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Unsupported,
+                message: "E5RT stream not available: call predict() at least once first".into(),
+            });
+        }
+        // SAFETY: `stream` is the live execution stream just borrowed from the
+        // engine; the setter only adjusts its scheduling hint.
+        let rc = unsafe {
+            sys::espresso::e5rt_execution_stream_set_quality_of_service(stream, qos_class)
+        };
+        e5rt_check(rc, "e5rt_execution_stream_set_quality_of_service")
+    }
+
+    /// Set the ANE execution priority of this model's borrowed E5RT execution
+    /// stream. The priority enum is not reversed (`0` verified).
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::Unsupported`] if the runtime is not warm (predict
+    /// first); [`sys::AneStatus::Internal`] (with the framework message) on
+    /// failure.
+    pub fn set_stream_ane_priority(&self, priority: u32) -> Result<()> {
+        let stream = self.e5rt_stream_handle();
+        if stream.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Unsupported,
+                message: "E5RT stream not available: call predict() at least once first".into(),
+            });
+        }
+        // SAFETY: `stream` is the live execution stream just borrowed from the
+        // engine; the setter only adjusts its priority hint.
+        let rc = unsafe {
+            sys::espresso::e5rt_execution_stream_set_ane_execution_priority(stream, priority)
+        };
+        e5rt_check(rc, "e5rt_execution_stream_set_ane_execution_priority")
     }
 }
 
@@ -3412,6 +3461,19 @@ pub fn e5rt_error_string(code: i32) -> &'static str {
     unsafe { CStr::from_ptr(p) }
         .to_str()
         .unwrap_or("invalid e5rt error string")
+}
+
+/// Map a non-zero `e5rt_error_code_t` to an [`Error`] carrying the framework's
+/// own message (via [`e5rt_error_string`]); `Ok(())` on `0`. `what` names the
+/// failing call.
+fn e5rt_check(rc: sys::espresso::E5rtErrorCode, what: &str) -> Result<()> {
+    if rc == 0 {
+        return Ok(());
+    }
+    Err(Error {
+        status: sys::AneStatus::Internal,
+        message: format!("{what} failed: {} (code {rc})", e5rt_error_string(rc)),
+    })
 }
 
 /// A zero-copy E5RT buffer object.
@@ -3575,18 +3637,6 @@ impl core::fmt::Debug for E5rtEvent<'_> {
 }
 
 impl E5rtEvent<'_> {
-    /// Map a non-zero `e5rt_error_code_t` to an [`Error`] with the framework's
-    /// own message; `Ok(())` on `0`.
-    fn check_e5rt(rc: sys::espresso::E5rtErrorCode, what: &str) -> Result<()> {
-        if rc == 0 {
-            return Ok(());
-        }
-        Err(Error {
-            status: sys::AneStatus::Internal,
-            message: format!("{what} failed: {} (code {rc})", e5rt_error_string(rc)),
-        })
-    }
-
     /// Signal the event, raising its last-signaled value to `value`.
     ///
     /// # Errors
@@ -3595,7 +3645,7 @@ impl E5rtEvent<'_> {
     pub fn signal(&self, value: u64) -> Result<()> {
         // SAFETY: `self.raw` is a live event handle.
         let rc = unsafe { sys::espresso::e5rt_async_event_signal(self.raw, value) };
-        Self::check_e5rt(rc, "e5rt_async_event_signal")
+        e5rt_check(rc, "e5rt_async_event_signal")
     }
 
     /// Block until the event's value reaches `value`, or `timeout` elapses.
@@ -3607,7 +3657,7 @@ impl E5rtEvent<'_> {
         let ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
         // SAFETY: `self.raw` is a live event handle.
         let rc = unsafe { sys::espresso::e5rt_async_event_sync_wait(self.raw, value, ns) };
-        Self::check_e5rt(rc, "e5rt_async_event_sync_wait")
+        e5rt_check(rc, "e5rt_async_event_sync_wait")
     }
 
     /// The event's last-signaled value (`0` if the query fails).
@@ -3641,7 +3691,7 @@ impl E5rtEvent<'_> {
         // SAFETY: `self.raw` is a live event handle.
         let rc =
             unsafe { sys::espresso::e5rt_async_event_set_active_future_value(self.raw, value) };
-        Self::check_e5rt(rc, "e5rt_async_event_set_active_future_value")
+        e5rt_check(rc, "e5rt_async_event_set_active_future_value")
     }
 
     /// The event's name (the one it was created with), or `None` if

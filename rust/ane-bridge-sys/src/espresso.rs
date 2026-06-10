@@ -84,6 +84,11 @@ pub type E5rtErrorCode = c_int;
 /// `e5rt_async_event_*` accessors.
 pub type AsyncEvent = *mut c_void;
 
+/// Opaque `e5rt_execution_stream_config_options` handle — a builder of stream
+/// behavior flags. Touch only through the
+/// `e5rt_execution_stream_config_options_*` accessors.
+pub type StreamConfigOptions = *mut c_void;
+
 unsafe extern "C" {
     // ----- Context -----
 
@@ -593,4 +598,123 @@ unsafe extern "C" {
     /// Always safe to call; the result points to a thread-local buffer valid
     /// until the next E5RT call on this thread.
     pub fn e5rt_get_last_error_message() -> *const c_char;
+
+    // ----- E5RT execution-stream tuning -----
+    //
+    // Adjust the scheduling of an `e5rt_execution_stream`. All return an
+    // `E5rtErrorCode` (`0` == success). Signatures recovered by `lldb` AND
+    // verified by calling on a live (borrowed) stream: `set_quality_of_service`
+    // (with a `qos_class_t`, e.g. `0x19` = user-initiated) and
+    // `set_ane_execution_priority` both returned `0`.
+    //
+    // The config-options object round-trips cleanly (create / set / get /
+    // release verified by calling — each flag set then read back). But
+    // `set_config_options` is VERIFIED to crash (`SIGBUS`) when applied to a
+    // borrowed, in-use stream: reconfiguring CoreML's live stream wholesale
+    // tears down state the engine still holds. Use it only on a stream you
+    // created yourself (`e5rt_execution_stream_create`, not yet bound) — never
+    // on a borrowed one.
+
+    /// Set the borrowed stream's scheduling quality-of-service. `qos_class` is a
+    /// Darwin `qos_class_t` (`0x21` user-interactive, `0x19` user-initiated,
+    /// `0x15` default, `0x11` utility, `0x09` background). Verified safe on a
+    /// borrowed stream.
+    ///
+    /// # Safety
+    /// `stream` must be a live `e5rt_execution_stream*` (borrowed, not consumed).
+    pub fn e5rt_execution_stream_set_quality_of_service(
+        stream: *mut c_void,
+        qos_class: u32,
+    ) -> E5rtErrorCode;
+
+    /// Set the borrowed stream's ANE execution priority. The priority enum is
+    /// not reversed (`0` verified). Verified safe on a borrowed stream.
+    ///
+    /// # Safety
+    /// `stream` must be a live `e5rt_execution_stream*` (borrowed, not consumed).
+    pub fn e5rt_execution_stream_set_ane_execution_priority(
+        stream: *mut c_void,
+        priority: u32,
+    ) -> E5rtErrorCode;
+
+    /// Apply a config-options object to a stream.
+    ///
+    /// # Safety
+    /// `stream` must be a live `e5rt_execution_stream*` and `options` a live
+    /// config-options object. **Verified to crash on a borrowed/in-use stream**
+    /// — only call on a stream you created yourself.
+    pub fn e5rt_execution_stream_set_config_options(
+        stream: *mut c_void,
+        options: StreamConfigOptions,
+    ) -> E5rtErrorCode;
+
+    /// Create a stream config-options object (out-first). Round-trip verified.
+    ///
+    /// # Safety
+    /// `out` must be a writable `*mut StreamConfigOptions`. Release with
+    /// [`e5rt_execution_stream_config_options_release`].
+    pub fn e5rt_execution_stream_config_options_create(
+        out: *mut StreamConfigOptions,
+    ) -> E5rtErrorCode;
+
+    /// Enable/disable concurrent synchronous execution on the options.
+    ///
+    /// # Safety
+    /// `opts` must be a live config-options object.
+    pub fn e5rt_execution_stream_config_options_set_enable_concurrent_sync_execution(
+        opts: StreamConfigOptions,
+        value: bool,
+    ) -> E5rtErrorCode;
+
+    /// Read the concurrent-sync-execution flag into `*out`.
+    ///
+    /// # Safety
+    /// `opts` must be live; `out` a writable `*mut bool`.
+    pub fn e5rt_execution_stream_config_options_get_enable_concurrent_sync_execution(
+        opts: StreamConfigOptions,
+        out: *mut bool,
+    ) -> E5rtErrorCode;
+
+    /// Enable/disable low-latency async events on the options.
+    ///
+    /// # Safety
+    /// `opts` must be a live config-options object.
+    pub fn e5rt_execution_stream_config_options_set_enable_low_latency_async_events(
+        opts: StreamConfigOptions,
+        value: bool,
+    ) -> E5rtErrorCode;
+
+    /// Read the low-latency-async-events flag into `*out`.
+    ///
+    /// # Safety
+    /// `opts` must be live; `out` a writable `*mut bool`.
+    pub fn e5rt_execution_stream_config_options_get_enable_low_latency_async_events(
+        opts: StreamConfigOptions,
+        out: *mut bool,
+    ) -> E5rtErrorCode;
+
+    /// Enable/disable skipping I/O fences on the options.
+    ///
+    /// # Safety
+    /// `opts` must be a live config-options object.
+    pub fn e5rt_execution_stream_config_options_set_skip_io_fences(
+        opts: StreamConfigOptions,
+        value: bool,
+    ) -> E5rtErrorCode;
+
+    /// Read the skip-I/O-fences flag into `*out`.
+    ///
+    /// # Safety
+    /// `opts` must be live; `out` a writable `*mut bool`.
+    pub fn e5rt_execution_stream_config_options_get_skip_io_fences(
+        opts: StreamConfigOptions,
+        out: *mut bool,
+    ) -> E5rtErrorCode;
+
+    /// Release a config-options object.
+    ///
+    /// # Safety
+    /// `opts` must be a live config-options object, released exactly once.
+    pub fn e5rt_execution_stream_config_options_release(opts: StreamConfigOptions)
+    -> E5rtErrorCode;
 }

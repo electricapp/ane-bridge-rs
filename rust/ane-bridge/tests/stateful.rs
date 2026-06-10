@@ -413,3 +413,39 @@ fn e5rt_error_string_is_legible() {
         );
     }
 }
+
+/// The borrowed E5RT stream accepts scheduling tuning: QoS (a Darwin
+/// `qos_class_t`) and ANE execution priority both apply without error.
+#[test]
+fn e5rt_stream_qos_and_priority_tunable() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+    warm(&m);
+
+    // 0x19 == QOS_CLASS_USER_INITIATED.
+    m.set_stream_qos(0x19).expect("set QoS on borrowed stream");
+    m.set_stream_ane_priority(0)
+        .expect("set ANE priority on borrowed stream");
+    println!("tuned borrowed stream: qos=user-initiated, ane_priority=0");
+}
+
+/// Stream tuning is gated on a warm runtime too: before any predict there is no
+/// stream, so tuning is refused (not a null-deref crash).
+#[test]
+fn e5rt_stream_tuning_requires_warm_runtime() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+    let err = m
+        .set_stream_qos(0x19)
+        .expect_err("cold-runtime stream tuning must be refused, not crash");
+    assert!(
+        matches!(err.status, ane_bridge::sys::AneStatus::Unsupported),
+        "expected Unsupported for a cold runtime, got {err:?}"
+    );
+}

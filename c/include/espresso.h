@@ -298,6 +298,46 @@ e5rt_error_code_t e5rt_async_event_release(e5rt_async_event_t evt);
 const char* e5rt_error_code_get_string(e5rt_error_code_t code);
 const char* e5rt_get_last_error_message(void);
 
+/* Execution-stream tuning.
+ *
+ * Adjust the scheduling of an e5rt_execution_stream; all return
+ * e5rt_error_code_t (0 == success). VERIFIED by calling on a borrowed
+ * (CoreML-owned) stream: set_quality_of_service (a Darwin qos_class_t, e.g.
+ * 0x19 user-initiated) and set_ane_execution_priority both returned 0. The
+ * config-options object round-trips (create/set/get/release verified).
+ *
+ * WARNING: set_config_options is VERIFIED to crash (SIGBUS) on a borrowed,
+ * in-use stream — reconfiguring CoreML's live stream wholesale tears down
+ * engine state. Use it only on a stream you created yourself. */
+typedef void* e5rt_execution_stream_config_options_t;
+
+e5rt_error_code_t
+e5rt_execution_stream_set_quality_of_service(void* stream /* e5rt_execution_stream */,
+                                             uint32_t qos_class);
+e5rt_error_code_t e5rt_execution_stream_set_ane_execution_priority(void* stream, uint32_t priority);
+e5rt_error_code_t e5rt_execution_stream_set_config_options(
+    void* stream,
+    e5rt_execution_stream_config_options_t options); /* crashes on a borrowed stream */
+
+e5rt_error_code_t
+e5rt_execution_stream_config_options_create(e5rt_execution_stream_config_options_t* out);
+e5rt_error_code_t e5rt_execution_stream_config_options_set_enable_concurrent_sync_execution(
+    e5rt_execution_stream_config_options_t opts, bool value);
+e5rt_error_code_t e5rt_execution_stream_config_options_get_enable_concurrent_sync_execution(
+    e5rt_execution_stream_config_options_t opts, bool* out);
+e5rt_error_code_t e5rt_execution_stream_config_options_set_enable_low_latency_async_events(
+    e5rt_execution_stream_config_options_t opts, bool value);
+e5rt_error_code_t e5rt_execution_stream_config_options_get_enable_low_latency_async_events(
+    e5rt_execution_stream_config_options_t opts, bool* out);
+e5rt_error_code_t
+e5rt_execution_stream_config_options_set_skip_io_fences(e5rt_execution_stream_config_options_t opts,
+                                                        bool value);
+e5rt_error_code_t
+e5rt_execution_stream_config_options_get_skip_io_fences(e5rt_execution_stream_config_options_t opts,
+                                                        bool* out);
+e5rt_error_code_t
+e5rt_execution_stream_config_options_release(e5rt_execution_stream_config_options_t opts);
+
 #ifdef __cplusplus
 }
 #endif
