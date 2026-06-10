@@ -103,6 +103,22 @@ pub type GpuDevice = *mut c_void;
 /// `e5rt_surface_object_*` accessors.
 pub type SurfaceObject = *mut c_void;
 
+/// Opaque `e5rt_program_library` handle.
+///
+/// The compiled program (functions + e5 bundle) an `MLE5Engine` loaded. Borrow
+/// the live one via [`crate::ane_state_e5rt_program_library`] and drive the
+/// read-only `e5rt_program_library_*` introspectors on it (engine-owned — do
+/// not release).
+pub type ProgramLibrary = *mut c_void;
+
+/// Opaque `e5rt_execution_stream_operation` handle.
+///
+/// One compiled operation on an execution stream. Borrow a live one via
+/// [`crate::ane_state_e5rt_operation_at`] and drive the read-only
+/// `e5rt_execution_stream_operation_*` introspectors on it (engine-owned — do
+/// not release).
+pub type Operation = *mut c_void;
+
 unsafe extern "C" {
     // ----- Context -----
 
@@ -912,4 +928,105 @@ unsafe extern "C" {
     /// # Safety
     /// `out_fourcc` must be a writable `*mut u32`.
     pub fn e5rt_surface_format_to_cvpb_4cc(format: u32, out_fourcc: *mut u32) -> E5rtErrorCode;
+
+    // ----- E5RT program library + operation introspection (read-only) -----
+    //
+    // Read-only introspectors over the live program / operations an MLE5Engine
+    // built — reachable as engine-owned borrows (see `ane_state_e5rt_program_-
+    // library` / `_operation_at`). All verified by calling on the warmed
+    // fixture: function names, e5 bundle path, op name, and I/O names all came
+    // back correct (e.g. function "main", op "state_fixture", input "x",
+    // output "reduce_mean_0").
+    //
+    // The `_get_*_names` calls take the count BY VALUE (pre-fetch with the
+    // matching `_get_num_*`) and a CALLER-allocated array of `count` `*const
+    // c_char` slots; the strings are library-owned (do not free). These handles
+    // are engine-owned: introspect only, never release (releasing a retained
+    // sub-handle such as an io port aborts — the engine co-owns it).
+
+    /// Number of functions in the program library (out-param).
+    /// # Safety
+    /// `lib` must be a live, engine-owned `e5rt_program_library`; `out` writable.
+    pub fn e5rt_program_library_get_num_functions(
+        lib: ProgramLibrary,
+        out: *mut u64,
+    ) -> E5rtErrorCode;
+
+    /// Write `count` function-name C strings (library-owned) into `out_names`.
+    /// # Safety
+    /// `lib` live; `count` from `get_num_functions`; `out_names` an array of at
+    /// least `count` writable `*const c_char` slots.
+    pub fn e5rt_program_library_get_function_names(
+        lib: ProgramLibrary,
+        count: u64,
+        out_names: *mut *const c_char,
+    ) -> E5rtErrorCode;
+
+    /// Write the program library's on-disk e5 bundle path (library-owned C
+    /// string) to `*out`.
+    /// # Safety
+    /// `lib` live; `out` a writable `*mut *const c_char`.
+    pub fn e5rt_program_library_get_e5_bundle_path(
+        lib: ProgramLibrary,
+        out: *mut *const c_char,
+    ) -> E5rtErrorCode;
+
+    /// Operation name (library-owned C string) to `*out`.
+    /// # Safety
+    /// `op` must be a live, engine-owned operation; `out` writable.
+    pub fn e5rt_execution_stream_operation_get_opname(
+        op: Operation,
+        out: *mut *const c_char,
+    ) -> E5rtErrorCode;
+
+    /// Number of inputs / outputs / inouts (out-param).
+    /// # Safety
+    /// `op` live; `out` a writable `*mut u64`.
+    pub fn e5rt_execution_stream_operation_get_num_inputs(
+        op: Operation,
+        out: *mut u64,
+    ) -> E5rtErrorCode;
+    /// See [`e5rt_execution_stream_operation_get_num_inputs`].
+    /// # Safety
+    /// As [`e5rt_execution_stream_operation_get_num_inputs`].
+    pub fn e5rt_execution_stream_operation_get_num_outputs(
+        op: Operation,
+        out: *mut u64,
+    ) -> E5rtErrorCode;
+    /// See [`e5rt_execution_stream_operation_get_num_inputs`].
+    /// # Safety
+    /// As [`e5rt_execution_stream_operation_get_num_inputs`].
+    pub fn e5rt_execution_stream_operation_get_num_inouts(
+        op: Operation,
+        out: *mut u64,
+    ) -> E5rtErrorCode;
+
+    /// Write `count` input-name C strings (op-owned) into `out_names` (count
+    /// from `get_num_inputs`).
+    /// # Safety
+    /// `op` live; `out_names` an array of at least `count` writable slots.
+    pub fn e5rt_execution_stream_operation_get_input_names(
+        op: Operation,
+        count: u64,
+        out_names: *mut *const c_char,
+    ) -> E5rtErrorCode;
+    /// Output names; see [`e5rt_execution_stream_operation_get_input_names`].
+    /// # Safety
+    /// As [`e5rt_execution_stream_operation_get_input_names`] (count from
+    /// `get_num_outputs`).
+    pub fn e5rt_execution_stream_operation_get_output_names(
+        op: Operation,
+        count: u64,
+        out_names: *mut *const c_char,
+    ) -> E5rtErrorCode;
+    /// Inout (e.g. state) names; see
+    /// [`e5rt_execution_stream_operation_get_input_names`].
+    /// # Safety
+    /// As [`e5rt_execution_stream_operation_get_input_names`] (count from
+    /// `get_num_inouts`).
+    pub fn e5rt_execution_stream_operation_get_inout_names(
+        op: Operation,
+        count: u64,
+        out_names: *mut *const c_char,
+    ) -> E5rtErrorCode;
 }

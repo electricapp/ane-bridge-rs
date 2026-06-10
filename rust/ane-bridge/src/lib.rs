@@ -3424,6 +3424,40 @@ impl StateModel {
         };
         e5rt_check(rc, "e5rt_execution_stream_set_ane_execution_priority")
     }
+
+    /// Borrow a read-only view of the live `e5rt_program_library` the engine
+    /// loaded for this model — its functions and e5 bundle path — or `None`
+    /// before the first [`Self::predict`] / for a non-MLE5 model.
+    #[must_use]
+    pub fn e5rt_program_library(&self) -> Option<E5rtProgramLibrary<'_>> {
+        // SAFETY: `self.raw` is a live model handle; the C side returns a
+        // borrowed, engine-owned `e5rt_program_library*` or null.
+        let raw = unsafe { sys::ane_state_e5rt_program_library(self.raw) };
+        (!raw.is_null()).then_some(E5rtProgramLibrary {
+            raw,
+            _src: core::marker::PhantomData,
+        })
+    }
+
+    /// Read-only views of the live `e5rt_execution_stream_operation`s the engine
+    /// built on this model's stream (empty before the first [`Self::predict`] /
+    /// for a non-MLE5 model). Each exposes its op name and I/O names.
+    #[must_use]
+    pub fn e5rt_operations(&self) -> Vec<E5rtOperation<'_>> {
+        // SAFETY: `self.raw` is a live model handle.
+        let count = unsafe { sys::ane_state_e5rt_operation_count(self.raw) };
+        (0..count)
+            .filter_map(|i| {
+                // SAFETY: `i` is in `[0, count)`; the C side returns a borrowed,
+                // engine-owned operation handle or null.
+                let raw = unsafe { sys::ane_state_e5rt_operation_at(self.raw, i) };
+                (!raw.is_null()).then_some(E5rtOperation {
+                    raw,
+                    _src: core::marker::PhantomData,
+                })
+            })
+            .collect()
+    }
 }
 
 impl Drop for StateModel {
@@ -3497,6 +3531,46 @@ pub fn fourcc_for_surface_format(format: u32) -> Option<u32> {
     // SAFETY: `out` is a writable `u32`; cold-safe pure lookup.
     let rc = unsafe { sys::espresso::e5rt_surface_format_to_cvpb_4cc(format, &raw mut out) };
     (rc == 0).then_some(out)
+}
+
+/// An E5RT count getter: `(handle, *mut u64) -> error_code`.
+type E5rtCountFn = unsafe extern "C" fn(*mut c_void, *mut u64) -> sys::espresso::E5rtErrorCode;
+/// An E5RT name-list getter: `(handle, count, *mut *const c_char) -> error_code`.
+type E5rtNamesFn =
+    unsafe extern "C" fn(*mut c_void, u64, *mut *const c_char) -> sys::espresso::E5rtErrorCode;
+
+/// Read an E5RT name list — `count` then a caller-allocated array of that many
+/// library-owned C strings — into owned `String`s. Empty on any failure.
+///
+/// # Safety
+/// `handle` must be a live, engine-owned handle accepted by both `count` and
+/// `names`; the two functions must be a matching `get_num_* `/`get_*_names`
+/// pair for it.
+unsafe fn e5rt_name_list(
+    handle: *mut c_void,
+    count: E5rtCountFn,
+    names: E5rtNamesFn,
+) -> Vec<String> {
+    let mut n: u64 = 0;
+    // SAFETY: `handle` is live; `&raw mut n` is a writable `*mut u64`.
+    if unsafe { count(handle, &raw mut n) } != 0 || n == 0 {
+        return Vec::new();
+    }
+    let len = usize::try_from(n).unwrap_or(0);
+    let mut ptrs: Vec<*const c_char> = vec![ptr::null(); len];
+    // SAFETY: `handle` live; `ptrs` holds `len == n` writable slots, matching
+    // the count the framework expects.
+    if unsafe { names(handle, n, ptrs.as_mut_ptr()) } != 0 {
+        return Vec::new();
+    }
+    ptrs.into_iter()
+        .filter(|p| !p.is_null())
+        .map(|p| {
+            // SAFETY: `p` is a non-null library-owned NUL-terminated C string;
+            // copied out immediately.
+            unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+        })
+        .collect()
 }
 
 /// A zero-copy E5RT buffer object.
@@ -3834,5 +3908,172 @@ impl Drop for E5rtGpuDevice {
     fn drop(&mut self) {
         // SAFETY: `self.raw` came from a verified retain and is released once.
         unsafe { sys::espresso::e5rt_compute_gpu_device_release(self.raw) };
+    }
+}
+
+// =============================================================
+// E5RT graph introspection (read-only)
+// =============================================================
+
+/// A read-only view of the live `e5rt_program_library` an `MLE5Engine` loaded
+/// for a [`StateModel`] — its functions and on-disk e5 bundle.
+///
+/// Borrowed from the model (the handle is engine-owned, so nothing is
+/// released); `'src` keeps it from outliving the model. Obtain via
+/// [`StateModel::e5rt_program_library`].
+pub struct E5rtProgramLibrary<'src> {
+    /// Borrowed, engine-owned `e5rt_program_library` handle.
+    raw: sys::espresso::ProgramLibrary,
+    /// Ties the view to the owning model for `'src`.
+    _src: core::marker::PhantomData<&'src ()>,
+}
+
+// SAFETY: the handle is an engine-owned pointer with no thread affinity; the
+// view only reads through it. Not `Sync`.
+unsafe impl Send for E5rtProgramLibrary<'_> {}
+
+impl core::fmt::Debug for E5rtProgramLibrary<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("E5rtProgramLibrary")
+            .field("functions", &self.function_names())
+            .finish_non_exhaustive()
+    }
+}
+
+impl E5rtProgramLibrary<'_> {
+    /// Number of functions in the library.
+    #[must_use]
+    pub fn num_functions(&self) -> usize {
+        let mut n: u64 = 0;
+        // SAFETY: `self.raw` is a live, engine-owned library; `n` is writable.
+        let rc =
+            unsafe { sys::espresso::e5rt_program_library_get_num_functions(self.raw, &raw mut n) };
+        if rc == 0 {
+            usize::try_from(n).unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    /// The library's function names (e.g. `["main"]`).
+    #[must_use]
+    pub fn function_names(&self) -> Vec<String> {
+        // SAFETY: matching count / names pair for a live library handle.
+        unsafe {
+            e5rt_name_list(
+                self.raw,
+                sys::espresso::e5rt_program_library_get_num_functions,
+                sys::espresso::e5rt_program_library_get_function_names,
+            )
+        }
+    }
+
+    /// The on-disk e5 bundle-cache path the program was compiled to, or `None`.
+    #[must_use]
+    pub fn bundle_path(&self) -> Option<String> {
+        let mut p: *const c_char = ptr::null();
+        // SAFETY: `self.raw` live; `p` is a writable pointer slot. The returned
+        // string is library-owned; copied out immediately.
+        let rc =
+            unsafe { sys::espresso::e5rt_program_library_get_e5_bundle_path(self.raw, &raw mut p) };
+        if rc != 0 || p.is_null() {
+            return None;
+        }
+        // SAFETY: `p` is a non-null library-owned NUL-terminated C string.
+        Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+    }
+
+    /// The raw `e5rt_program_library` handle (borrowed — do not release).
+    #[must_use]
+    pub const fn as_raw(&self) -> sys::espresso::ProgramLibrary {
+        self.raw
+    }
+}
+
+/// A read-only view of one live `e5rt_execution_stream_operation` an
+/// `MLE5Engine` built — its op name and I/O port names.
+///
+/// Borrowed from the model (engine-owned handle, nothing released); `'src`
+/// keeps it from outliving the model. Obtain via [`StateModel::e5rt_operations`].
+pub struct E5rtOperation<'src> {
+    /// Borrowed, engine-owned `e5rt_execution_stream_operation` handle.
+    raw: sys::espresso::Operation,
+    /// Ties the view to the owning model for `'src`.
+    _src: core::marker::PhantomData<&'src ()>,
+}
+
+// SAFETY: as [`E5rtProgramLibrary`] — engine-owned read-only handle.
+unsafe impl Send for E5rtOperation<'_> {}
+
+impl core::fmt::Debug for E5rtOperation<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("E5rtOperation")
+            .field("name", &self.name())
+            .field("inputs", &self.input_names())
+            .field("outputs", &self.output_names())
+            .finish_non_exhaustive()
+    }
+}
+
+impl E5rtOperation<'_> {
+    /// The operation's name (e.g. the model name), or `None`.
+    #[must_use]
+    pub fn name(&self) -> Option<String> {
+        let mut p: *const c_char = ptr::null();
+        // SAFETY: `self.raw` live; `p` is a writable pointer slot.
+        let rc = unsafe {
+            sys::espresso::e5rt_execution_stream_operation_get_opname(self.raw, &raw mut p)
+        };
+        if rc != 0 || p.is_null() {
+            return None;
+        }
+        // SAFETY: `p` is a non-null op-owned NUL-terminated C string.
+        Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+    }
+
+    /// The operation's input feature names.
+    #[must_use]
+    pub fn input_names(&self) -> Vec<String> {
+        // SAFETY: matching count / names pair for a live operation handle.
+        unsafe {
+            e5rt_name_list(
+                self.raw,
+                sys::espresso::e5rt_execution_stream_operation_get_num_inputs,
+                sys::espresso::e5rt_execution_stream_operation_get_input_names,
+            )
+        }
+    }
+
+    /// The operation's output feature names.
+    #[must_use]
+    pub fn output_names(&self) -> Vec<String> {
+        // SAFETY: matching count / names pair for a live operation handle.
+        unsafe {
+            e5rt_name_list(
+                self.raw,
+                sys::espresso::e5rt_execution_stream_operation_get_num_outputs,
+                sys::espresso::e5rt_execution_stream_operation_get_output_names,
+            )
+        }
+    }
+
+    /// The operation's in-out (e.g. resident state) names.
+    #[must_use]
+    pub fn inout_names(&self) -> Vec<String> {
+        // SAFETY: matching count / names pair for a live operation handle.
+        unsafe {
+            e5rt_name_list(
+                self.raw,
+                sys::espresso::e5rt_execution_stream_operation_get_num_inouts,
+                sys::espresso::e5rt_execution_stream_operation_get_inout_names,
+            )
+        }
+    }
+
+    /// The raw `e5rt_execution_stream_operation` handle (borrowed — do not
+    /// release).
+    #[must_use]
+    pub const fn as_raw(&self) -> sys::espresso::Operation {
+        self.raw
     }
 }

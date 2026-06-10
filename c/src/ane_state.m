@@ -16,6 +16,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 
+#include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -480,5 +481,81 @@ void* ane_state_e5rt_stream(const AneStateModel* m) {
             return NULL;
         }
         return ivar_value(stream, "_streamHandle");
+    }
+}
+
+void* ane_state_e5rt_program_library(const AneStateModel* m) {
+    if (!m) {
+        return NULL;
+    }
+    @autoreleasepool {
+        /* MLE5Engine._programLibrary (MLE5ProgramLibrary) ->
+         * _programLibraryHandle (e5rt_program_library*). Nil before the engine
+         * loads its program, or for non-MLE5 models. Borrowed; do not release. */
+        id engine = (id)ivar_value(m->model, "_internalEngine");
+        id lib = (id)ivar_value(engine, "_programLibrary");
+        return ivar_value(lib, "_programLibraryHandle");
+    }
+}
+
+/* The per-stream operations array (MLE5ExecutionStream._operations), or nil.
+ * Each element is an MLE5ExecutionStreamOperation whose _operationHandle ivar
+ * is the e5rt_execution_stream_operation*. Walks the same borrowed stream as
+ * ane_state_e5rt_stream. */
+static id state_stream_operations(const AneStateModel* m) {
+    if (!m) {
+        return nil;
+    }
+    id engine = (id)ivar_value(m->model, "_internalEngine");
+    id pool = (id)ivar_value(engine, "_streamPool");
+    if (!pool) {
+        return nil;
+    }
+    id streams = (id)ivar_value(pool, "_allStreams");
+    if (![streams isKindOfClass:[NSSet class]] || [(NSSet*)streams count] == 0) {
+        streams = (id)ivar_value(pool, "_pool");
+    }
+    if (![streams isKindOfClass:[NSSet class]]) {
+        return nil;
+    }
+    id stream = [(NSSet*)streams anyObject];
+    if (!stream) {
+        return nil;
+    }
+    id ops = (id)ivar_value(stream, "_operations");
+    if (![ops isKindOfClass:[NSArray class]]) {
+        return nil;
+    }
+    return ops;
+}
+
+int ane_state_e5rt_operation_count(const AneStateModel* m) {
+    @autoreleasepool {
+        id ops = state_stream_operations(m);
+        if (!ops) {
+            return 0;
+        }
+        NSUInteger count = [(NSArray*)ops count];
+        if (count > (NSUInteger)INT_MAX) {
+            return INT_MAX;
+        }
+        return (int)count;
+    }
+}
+
+void* ane_state_e5rt_operation_at(const AneStateModel* m, int idx) {
+    if (idx < 0) {
+        return NULL;
+    }
+    @autoreleasepool {
+        id ops = state_stream_operations(m);
+        if (!ops) {
+            return NULL;
+        }
+        if ((NSUInteger)idx >= [(NSArray*)ops count]) {
+            return NULL;
+        }
+        id op = [(NSArray*)ops objectAtIndex:(NSUInteger)idx];
+        return ivar_value(op, "_operationHandle");
     }
 }

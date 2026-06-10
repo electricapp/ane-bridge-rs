@@ -1346,6 +1346,30 @@ unsafe extern "C" {
     /// pointer is borrowed and valid only while `m` (and its engine) live.
     pub fn ane_state_e5rt_stream(m: *const AneStateModel) -> *mut c_void;
 
+    /// Borrow the live `e5rt_program_library*` the engine loaded for `m`, or
+    /// null before the program loads / for non-MLE5 models. Engine-owned — do
+    /// not release.
+    ///
+    /// # Safety
+    /// `m` must be a live handle from [`ane_state_model_open`]. The returned
+    /// pointer is borrowed and valid only while `m` (and its engine) live.
+    pub fn ane_state_e5rt_program_library(m: *const AneStateModel) -> *mut c_void;
+
+    /// Count of `e5rt_execution_stream_operation`s on `m`'s stream (`0` before
+    /// the first predict / for non-MLE5 models).
+    ///
+    /// # Safety
+    /// `m` must be a live handle from [`ane_state_model_open`].
+    pub fn ane_state_e5rt_operation_count(m: *const AneStateModel) -> c_int;
+
+    /// Borrow the `idx`-th live `e5rt_execution_stream_operation*` on `m`'s
+    /// stream, or null if out of range. Engine-owned — do not release.
+    ///
+    /// # Safety
+    /// `m` must be a live handle from [`ane_state_model_open`]. The returned
+    /// pointer is borrowed and valid only while `m` (and its engine) live.
+    pub fn ane_state_e5rt_operation_at(m: *const AneStateModel, idx: c_int) -> *mut c_void;
+
     /// Internal: run a single adversarial case through the C-side
     /// `LiveInputList` parser. Not stable API.
     pub fn _ane_internal_fuzz_parse_one(fc: *const AneFuzzCase) -> AneStatus;

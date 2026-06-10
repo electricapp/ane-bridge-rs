@@ -669,6 +669,22 @@ const char* ane_state_last_error(void);
  * The handle is borrowed — owned by the engine; do not release it. */
 void* ane_state_e5rt_stream(const AneStateModel* m);
 
+/* Borrow the live `e5rt_program_library*` the engine loaded for this model
+ * (MLE5Engine._programLibrary), or NULL before the program loads / for non-MLE5
+ * models. Borrowed — owned by the engine; do not release. Drive the read-only
+ * `e5rt_program_library_*` introspectors on it. */
+void* ane_state_e5rt_program_library(const AneStateModel* m);
+
+/* The count of `e5rt_execution_stream_operation`s the engine built on this
+ * model's stream (0 before the first predict / for non-MLE5 models). */
+int ane_state_e5rt_operation_count(const AneStateModel* m);
+
+/* Borrow the `idx`-th live `e5rt_execution_stream_operation*` on this model's
+ * stream, or NULL if out of range. Borrowed — owned by the engine; do not
+ * release. Drive the read-only `e5rt_execution_stream_operation_*`
+ * introspectors on it. */
+void* ane_state_e5rt_operation_at(const AneStateModel* m, int idx);
+
 /* =====================================================================
  * Internal test hooks (NOT part of the stable API)
  *

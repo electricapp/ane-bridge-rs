@@ -399,6 +399,46 @@ e5rt_error_code_t e5rt_surface_object_release(e5rt_surface_object_t obj);
 e5rt_error_code_t e5rt_cvpb_4cc_to_surface_format(uint32_t fourcc, uint32_t* out_format);
 e5rt_error_code_t e5rt_surface_format_to_cvpb_4cc(uint32_t format, uint32_t* out_fourcc);
 
+/* Program library + operation introspection (READ-ONLY).
+ *
+ * Read-only introspectors over the live program / operations an MLE5Engine
+ * built. Borrow the handles engine-owned (see ane_state_e5rt_program_library /
+ * _operation_at in ane_bridge.h); introspect only, never release (releasing a
+ * retained sub-handle aborts -- the engine co-owns it). VERIFIED by calling on
+ * the warmed fixture: function "main", e5 bundle path, op "state_fixture",
+ * input "x", output "reduce_mean_0".
+ *
+ * The get_*_names calls take the count BY VALUE (pre-fetch via the matching
+ * get_num_*) and a CALLER-allocated array of `count` (const char*) slots; the
+ * strings are library-owned (do not free). */
+typedef void* e5rt_program_library_t;
+typedef void* e5rt_execution_stream_operation_t;
+
+e5rt_error_code_t e5rt_program_library_get_num_functions(e5rt_program_library_t lib, uint64_t* out);
+e5rt_error_code_t e5rt_program_library_get_function_names(e5rt_program_library_t lib,
+                                                          uint64_t count, const char** out_names);
+e5rt_error_code_t e5rt_program_library_get_e5_bundle_path(e5rt_program_library_t lib,
+                                                          const char** out);
+
+e5rt_error_code_t e5rt_execution_stream_operation_get_opname(e5rt_execution_stream_operation_t op,
+                                                             const char** out);
+e5rt_error_code_t
+e5rt_execution_stream_operation_get_num_inputs(e5rt_execution_stream_operation_t op, uint64_t* out);
+e5rt_error_code_t
+e5rt_execution_stream_operation_get_num_outputs(e5rt_execution_stream_operation_t op,
+                                                uint64_t* out);
+e5rt_error_code_t
+e5rt_execution_stream_operation_get_num_inouts(e5rt_execution_stream_operation_t op, uint64_t* out);
+e5rt_error_code_t
+e5rt_execution_stream_operation_get_input_names(e5rt_execution_stream_operation_t op,
+                                                uint64_t count, const char** out_names);
+e5rt_error_code_t
+e5rt_execution_stream_operation_get_output_names(e5rt_execution_stream_operation_t op,
+                                                 uint64_t count, const char** out_names);
+e5rt_error_code_t
+e5rt_execution_stream_operation_get_inout_names(e5rt_execution_stream_operation_t op,
+                                                uint64_t count, const char** out_names);
+
 #ifdef __cplusplus
 }
 #endif

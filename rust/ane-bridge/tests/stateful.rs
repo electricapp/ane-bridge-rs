@@ -496,3 +496,80 @@ fn e5rt_surface_format_fourcc_round_trips() {
         "surface format {fmt} must map back to 'BGRA'"
     );
 }
+
+/// Read-only introspection of the live E5RT program library the engine loaded:
+/// its function list and on-disk e5 bundle path.
+#[test]
+fn e5rt_program_library_introspectable() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+    warm(&m);
+
+    let lib = m
+        .e5rt_program_library()
+        .expect("a warmed MLE5 model exposes its program library");
+    assert!(
+        lib.function_names().iter().any(|n| n == "main"),
+        "expected a 'main' function, got {:?}",
+        lib.function_names()
+    );
+    assert!(
+        lib.num_functions() >= 1,
+        "library must report >= 1 function"
+    );
+    let bundle = lib.bundle_path().expect("library has an e5 bundle path");
+    assert!(
+        bundle.contains("e5bundlecache") || bundle.ends_with(".bundle"),
+        "bundle path should point into the e5 bundle cache, got {bundle}"
+    );
+    println!("program library: functions={:?}", lib.function_names());
+}
+
+/// Read-only introspection of the live E5RT operation(s) the engine built: the
+/// op name and its I/O port names, which must match the fixture's schema.
+#[test]
+fn e5rt_operations_introspectable() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+    warm(&m);
+
+    let ops = m.e5rt_operations();
+    assert!(!ops.is_empty(), "a warmed model must expose >= 1 operation");
+    let op = &ops[0];
+    assert!(op.name().is_some(), "operation should report a name");
+    assert_eq!(op.input_names(), vec!["x"], "operation input names");
+    assert_eq!(
+        op.output_names(),
+        vec!["reduce_mean_0"],
+        "operation output names"
+    );
+    println!(
+        "operation {:?}: in={:?} out={:?} inout={:?}",
+        op.name(),
+        op.input_names(),
+        op.output_names(),
+        op.inout_names()
+    );
+}
+
+/// Operations are built lazily: before any predict there is no stream, so the
+/// introspection list is empty (not a crash).
+#[test]
+fn e5rt_operations_empty_before_predict() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+    // No predict: the engine has not built its stream / operations yet.
+    assert!(
+        m.e5rt_operations().is_empty(),
+        "no operations should be reachable before the first predict"
+    );
+}
