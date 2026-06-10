@@ -3730,3 +3730,86 @@ impl Drop for E5rtEvent<'_> {
         unsafe { sys::espresso::e5rt_async_event_release(self.raw) };
     }
 }
+
+// =============================================================
+// E5RT compute GPU device (Metal interop)
+// =============================================================
+
+/// An E5RT compute GPU device — a wrapper around an `id<MTLDevice>`.
+///
+/// Targets the GPU an E5RT operation runs on. Unlike buffers / events it needs
+/// no warm runtime, so it is constructed directly from a device. Drop releases
+/// the wrapper, not your `MTLDevice`.
+pub struct E5rtGpuDevice {
+    /// Owning `e5rt_compute_gpu_device` handle.
+    raw: sys::espresso::GpuDevice,
+}
+
+// SAFETY: a retained device-wrapper handle with no thread affinity; it can move
+// between threads. Not `Sync` — the C side makes no interior-mutation
+// guarantees.
+unsafe impl Send for E5rtGpuDevice {}
+
+impl core::fmt::Debug for E5rtGpuDevice {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("E5rtGpuDevice").finish_non_exhaustive()
+    }
+}
+
+impl E5rtGpuDevice {
+    /// Wrap an `id<MTLDevice>` (as a raw pointer) as an E5RT compute device. The
+    /// device is retained, so you may release your own reference after this
+    /// returns `Ok`.
+    ///
+    /// # Safety
+    /// `mtl_device` must be a live `id<MTLDevice>`.
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::Internal`] (with the framework message) on failure.
+    pub unsafe fn from_mtl_device(mtl_device: *mut c_void) -> Result<Self> {
+        let mut raw: sys::espresso::GpuDevice = ptr::null_mut();
+        // SAFETY: `mtl_device` is a live `id<MTLDevice>` per the contract; `raw`
+        // is written on success.
+        let rc = unsafe {
+            sys::espresso::e5rt_compute_gpu_device_retain_from_mtl_device(&raw mut raw, mtl_device)
+        };
+        e5rt_check(rc, "e5rt_compute_gpu_device_retain_from_mtl_device")?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message:
+                    "e5rt_compute_gpu_device_retain_from_mtl_device returned OK but null handle"
+                        .into(),
+            });
+        }
+        Ok(Self { raw })
+    }
+
+    /// The backing `id<MTLDevice>` as a raw pointer (borrowed — do not release),
+    /// or null if unavailable.
+    #[must_use]
+    pub fn mtl_device(&self) -> *mut c_void {
+        let mut out: *mut c_void = ptr::null_mut();
+        // SAFETY: `self.raw` is a live device handle; `out` is a writable
+        // pointer slot.
+        let rc = unsafe {
+            sys::espresso::e5rt_compute_gpu_device_get_mtl_device(self.raw, &raw mut out)
+        };
+        if rc == 0 { out } else { ptr::null_mut() }
+    }
+
+    /// The raw `e5rt_compute_gpu_device` handle, for driving the rest of the
+    /// `e5rt_*` C-ABI (e.g. overriding an operation's compute device). Borrowed
+    /// — do not release; the [`E5rtGpuDevice`] owns it.
+    #[must_use]
+    pub const fn as_raw(&self) -> sys::espresso::GpuDevice {
+        self.raw
+    }
+}
+
+impl Drop for E5rtGpuDevice {
+    fn drop(&mut self) {
+        // SAFETY: `self.raw` came from a verified retain and is released once.
+        unsafe { sys::espresso::e5rt_compute_gpu_device_release(self.raw) };
+    }
+}

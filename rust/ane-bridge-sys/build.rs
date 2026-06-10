@@ -114,6 +114,10 @@ fn main() -> IoResult<()> {
     // MLState → MLE5Engine / E5RT). It is the only route that runs state ops on
     // the ANE, and needs no ANE entitlement.
     println!("cargo:rustc-link-lib=framework=CoreML");
+    // Metal: the E5RT buffer / compute-device bindings interop with
+    // `MTLBuffer` / `id<MTLDevice>`; linking it lets dependents (e.g. the
+    // gpu-device round-trip test) reach `MTLCreateSystemDefaultDevice`.
+    println!("cargo:rustc-link-lib=framework=Metal");
 
     // Apple's private Espresso framework — the E5RT C API bound in
     // `src/espresso.rs`. Private frameworks aren't on the default linker

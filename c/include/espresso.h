@@ -338,6 +338,27 @@ e5rt_execution_stream_config_options_get_skip_io_fences(e5rt_execution_stream_co
 e5rt_error_code_t
 e5rt_execution_stream_config_options_release(e5rt_execution_stream_config_options_t opts);
 
+/* Compute GPU device — Metal interop.
+ *
+ * Wrap an id<MTLDevice> as an e5rt_compute_gpu_device and read it back; used to
+ * target / override the GPU an operation runs on. All return e5rt_error_code_t
+ * (0 == success). VERIFIED by calling COLD (no warm runtime): retain_from_mtl_-
+ * device retains its device and get_mtl_device round-tripped the same device.
+ *
+ * retain_all writes an array of *count device handles to *out_array; the array
+ * ownership / element-access convention is UNVERIFIED (probe saw count==1, but
+ * the written pointer is the array base, not a device handle). */
+typedef void* e5rt_compute_gpu_device_t;
+
+e5rt_error_code_t
+e5rt_compute_gpu_device_retain_from_mtl_device(e5rt_compute_gpu_device_t* out,
+                                               void* mtl_device /* id<MTLDevice> */);
+e5rt_error_code_t e5rt_compute_gpu_device_retain_all(e5rt_compute_gpu_device_t* out_array,
+                                                     uint64_t* count); /* array UNVERIFIED */
+e5rt_error_code_t e5rt_compute_gpu_device_get_mtl_device(e5rt_compute_gpu_device_t device,
+                                                         void** out /* id<MTLDevice>* */);
+e5rt_error_code_t e5rt_compute_gpu_device_release(e5rt_compute_gpu_device_t device);
+
 #ifdef __cplusplus
 }
 #endif

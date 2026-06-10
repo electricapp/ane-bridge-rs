@@ -449,3 +449,35 @@ fn e5rt_stream_tuning_requires_warm_runtime() {
         "expected Unsupported for a cold runtime, got {err:?}"
     );
 }
+
+// The system Metal device factory — reachable because `ane-bridge-sys` links
+// the Metal framework.
+unsafe extern "C" {
+    fn MTLCreateSystemDefaultDevice() -> *mut core::ffi::c_void;
+}
+
+/// An `MTLDevice` wrapped as an E5RT compute device round-trips back to the same
+/// device. Needs no model or warm runtime (GPU-device handles are standalone).
+#[test]
+fn e5rt_gpu_device_wraps_mtl_device() {
+    // SAFETY: returns the process's shared `MTLDevice` (or null on a host
+    // without one); we only retain it (via the wrapper) and compare the pointer.
+    let mtl = unsafe { MTLCreateSystemDefaultDevice() };
+    if mtl.is_null() {
+        println!("skipping: no system MTLDevice");
+        return;
+    }
+    // SAFETY: `mtl` is a live `id<MTLDevice>` from `MTLCreateSystemDefaultDevice`.
+    let dev = unsafe { ane_bridge::E5rtGpuDevice::from_mtl_device(mtl) }
+        .expect("wrap MTLDevice as E5RT compute device");
+    assert_eq!(
+        dev.mtl_device(),
+        mtl,
+        "the compute device must round-trip the same MTLDevice"
+    );
+    assert!(
+        !dev.as_raw().is_null(),
+        "wrapped device handle must be live"
+    );
+    println!("wrapped MTLDevice round-trips through E5rtGpuDevice");
+}

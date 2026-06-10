@@ -89,6 +89,13 @@ pub type AsyncEvent = *mut c_void;
 /// `e5rt_execution_stream_config_options_*` accessors.
 pub type StreamConfigOptions = *mut c_void;
 
+/// Opaque `e5rt_compute_gpu_device` handle.
+///
+/// An E5RT wrapper around an `id<MTLDevice>`, used to target / override the GPU
+/// an operation runs on. Touch only through the `e5rt_compute_gpu_device_*`
+/// accessors.
+pub type GpuDevice = *mut c_void;
+
 unsafe extern "C" {
     // ----- Context -----
 
@@ -717,4 +724,56 @@ unsafe extern "C" {
     /// `opts` must be a live config-options object, released exactly once.
     pub fn e5rt_execution_stream_config_options_release(opts: StreamConfigOptions)
     -> E5rtErrorCode;
+
+    // ----- E5RT compute GPU device (Metal interop) -----
+    //
+    // Wrap an `id<MTLDevice>` as an `e5rt_compute_gpu_device` and read it back.
+    // All return an `E5rtErrorCode` (`0` == success). Signatures recovered by
+    // `lldb` AND verified by calling COLD (no warm runtime needed):
+    // `retain_from_mtl_device` retains its `id<MTLDevice>` arg and
+    // `get_mtl_device` round-tripped the same device.
+
+    /// Wrap an `id<MTLDevice>` as an E5RT compute device (out-first; retains the
+    /// device). Verified by calling.
+    ///
+    /// # Safety
+    /// `out` must be writable; `mtl_device` a live `id<MTLDevice>`. Release with
+    /// [`e5rt_compute_gpu_device_release`].
+    pub fn e5rt_compute_gpu_device_retain_from_mtl_device(
+        out: *mut GpuDevice,
+        mtl_device: *mut c_void,
+    ) -> E5rtErrorCode;
+
+    /// Retain *all* compute GPU devices into a freshly written array.
+    ///
+    /// Writes an array of `*count` device handles to `*out_array`. The array's
+    /// ownership / element-access / free convention is UNVERIFIED (a probe
+    /// confirmed `count == 1` on an M-series Mac, but treating the written
+    /// pointer as a single device handle crashes — it is the array base, not a
+    /// device). Bound for completeness; prefer
+    /// [`e5rt_compute_gpu_device_retain_from_mtl_device`].
+    ///
+    /// # Safety
+    /// `out_array` must be a writable `*mut GpuDevice` (array base) and `count`
+    /// a writable `*mut u64`. See the unverified-array caveat above.
+    pub fn e5rt_compute_gpu_device_retain_all(
+        out_array: *mut GpuDevice,
+        count: *mut u64,
+    ) -> E5rtErrorCode;
+
+    /// Write the device's backing `id<MTLDevice>` to `*out`.
+    ///
+    /// # Safety
+    /// `device` must be a live compute GPU device; `out` a writable
+    /// `*mut *mut c_void` (an `id<MTLDevice>*`).
+    pub fn e5rt_compute_gpu_device_get_mtl_device(
+        device: GpuDevice,
+        out: *mut *mut c_void,
+    ) -> E5rtErrorCode;
+
+    /// Release a compute GPU device.
+    ///
+    /// # Safety
+    /// `device` must be a live compute GPU device, released exactly once.
+    pub fn e5rt_compute_gpu_device_release(device: GpuDevice) -> E5rtErrorCode;
 }
