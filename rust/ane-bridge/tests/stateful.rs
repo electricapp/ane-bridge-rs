@@ -84,8 +84,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
-use ane_bridge::{Buffer, StateModel};
+use ane_bridge::{Buffer, StateModel, e5rt_error_string};
 use tempfile::TempDir;
 
 /// Repo root: two levels up from this crate's manifest dir.
@@ -346,4 +347,69 @@ fn e5rt_buffer_creation_requires_warm_runtime() {
         matches!(err.status, ane_bridge::sys::AneStatus::Unsupported),
         "expected Unsupported for a cold runtime, got {err:?}"
     );
+}
+
+/// E5RT timeline event: signal raises the value, the query reads it back, and a
+/// wait on an already-reached value returns at once. The active future value
+/// round-trips a set/get, and the event remembers its name.
+#[test]
+fn e5rt_event_signal_wait_round_trips() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+    warm(&m);
+
+    let evt = m.create_event("kv-step").expect("create event");
+    assert_eq!(
+        evt.name().as_deref(),
+        Some("kv-step"),
+        "event keeps its name"
+    );
+
+    evt.signal(7).expect("signal");
+    assert_eq!(evt.last_signaled_value(), 7, "signal must raise the value");
+    // Already at 7, so waiting for 7 returns immediately rather than blocking.
+    evt.wait(7, Duration::from_secs(1))
+        .expect("wait for reached value");
+
+    evt.set_active_future_value(9).expect("set future value");
+    assert_eq!(
+        evt.active_future_value(),
+        9,
+        "active future value must round-trip"
+    );
+    println!("e5rt event round-trip ok (last_signaled=7, future=9)");
+}
+
+/// The same cold-runtime safety gate applies to events: creation before any
+/// predict is refused, not crashed.
+#[test]
+fn e5rt_event_creation_requires_warm_runtime() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+    let err = m
+        .create_event("cold")
+        .expect_err("cold-runtime event creation must be refused, not crash");
+    assert!(
+        matches!(err.status, ane_bridge::sys::AneStatus::Unsupported),
+        "expected Unsupported for a cold runtime, got {err:?}"
+    );
+}
+
+/// `e5rt_error_string` maps codes to the framework's own legible text. Pure
+/// function — needs no model or warm runtime, so it always runs.
+#[test]
+fn e5rt_error_string_is_legible() {
+    assert_eq!(e5rt_error_string(0), "OK", "code 0 is success");
+    for code in 1..=6 {
+        assert!(
+            !e5rt_error_string(code).is_empty(),
+            "code {code} should map to a non-empty message"
+        );
+    }
 }

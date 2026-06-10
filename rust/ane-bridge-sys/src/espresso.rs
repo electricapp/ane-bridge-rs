@@ -68,9 +68,21 @@ pub struct ErrorInfo {
 /// `e5rt_buffer_object_*` accessors.
 pub type BufferObject = *mut c_void;
 
-/// `e5rt_error_code_t`: `0` is success, non-zero is a failure code (the
-/// concrete enum is not reversed). Returned by the buffer-object entry points.
+/// `e5rt_error_code_t`: `0` is success, non-zero a failure code.
+///
+/// Partially reversed via [`e5rt_error_code_get_string`]: `0` = `OK`,
+/// `1` = `INVALID FUNCTION ARGUMENT`, `2` = `INVALID OPERATION`,
+/// `3` = `MEM ALLOC FAILURE`, `4` = `OUT OF BOUNDS ACCESS`,
+/// `5` = `INVALID TYPE PARAMETER`, `6` = `INVALID DATA TYPE`.
 pub type E5rtErrorCode = c_int;
+
+/// Opaque `e5rt_async_event` handle.
+///
+/// A timeline-semaphore-style synchronization primitive: signal it with a
+/// monotonically increasing `u64` value and wait for a target value. Used to
+/// order work on an `e5rt_execution_stream`. Touch only through the
+/// `e5rt_async_event_*` accessors.
+pub type AsyncEvent = *mut c_void;
 
 unsafe extern "C" {
     // ----- Context -----
@@ -479,4 +491,106 @@ unsafe extern "C" {
     /// # Safety
     /// `obj` must be a live buffer object, released exactly once.
     pub fn e5rt_buffer_object_release(obj: BufferObject) -> E5rtErrorCode;
+
+    // ----- E5RT async events (timeline synchronization) -----
+    //
+    // A timeline-semaphore primitive for ordering stream work: `signal` raises
+    // the event's value, `sync_wait` blocks until it reaches a target (or a
+    // timeout elapses). All return `E5rtErrorCode` (`0` == success); `create`
+    // is out-first like the buffer factory. Signatures recovered by `lldb` AND
+    // verified by calling: create returned a live handle whose `get_name`
+    // round-tripped the supplied name; `signal(v)` then `get_last_signaled_value`
+    // returned `v` and `sync_wait(v, ...)` returned immediately; the active
+    // future value round-tripped a set/get. Like buffer objects, these need a
+    // warm E5RT runtime (the safe wrapper gates on a live execution stream).
+    //
+    // The remaining trio — `e5rt_async_event_async_notify` (takes a callback),
+    // `_create_from_iosurface_shared_event`, `_get_iosurface_shared_event`
+    // (Metal shared-event interop) — is present in the canary but unverified,
+    // so it is left unbound.
+
+    /// Create a named timeline event. `out` is written on success; `flags` is a
+    /// 32-bit option word (`0` verified).
+    ///
+    /// # Safety
+    /// `out` must be writable; `name` a valid NUL-terminated C string (read
+    /// once). The E5RT runtime must be warm. Release with
+    /// [`e5rt_async_event_release`].
+    pub fn e5rt_async_event_create(
+        out: *mut AsyncEvent,
+        name: *const c_char,
+        flags: u32,
+    ) -> E5rtErrorCode;
+
+    /// Signal the event, raising its last-signaled value to `value`.
+    ///
+    /// # Safety
+    /// `evt` must be a live event handle.
+    pub fn e5rt_async_event_signal(evt: AsyncEvent, value: u64) -> E5rtErrorCode;
+
+    /// Block until the event's value reaches `value`, or `timeout_ns`
+    /// nanoseconds elapse. Returns a non-zero code on timeout.
+    ///
+    /// # Safety
+    /// `evt` must be a live event handle.
+    pub fn e5rt_async_event_sync_wait(
+        evt: AsyncEvent,
+        value: u64,
+        timeout_ns: u64,
+    ) -> E5rtErrorCode;
+
+    /// Write the event's last-signaled value to `*out`.
+    ///
+    /// # Safety
+    /// `evt` must be live; `out` a writable `*mut u64`.
+    pub fn e5rt_async_event_get_last_signaled_value(
+        evt: AsyncEvent,
+        out: *mut u64,
+    ) -> E5rtErrorCode;
+
+    /// Write the event's active future (pending target) value to `*out`.
+    ///
+    /// # Safety
+    /// `evt` must be live; `out` a writable `*mut u64`.
+    pub fn e5rt_async_event_get_active_future_value(
+        evt: AsyncEvent,
+        out: *mut u64,
+    ) -> E5rtErrorCode;
+
+    /// Set the event's active future (pending target) value.
+    ///
+    /// # Safety
+    /// `evt` must be a live event handle.
+    pub fn e5rt_async_event_set_active_future_value(evt: AsyncEvent, value: u64) -> E5rtErrorCode;
+
+    /// Write the event's borrowed name (library-owned C string) to `*out`.
+    ///
+    /// # Safety
+    /// `evt` must be live; `out` a writable `*mut *const c_char`. The returned
+    /// string is owned by the event; do not free it.
+    pub fn e5rt_async_event_get_name(evt: AsyncEvent, out: *mut *const c_char) -> E5rtErrorCode;
+
+    /// Release a timeline event.
+    ///
+    /// # Safety
+    /// `evt` must be a live event handle, released exactly once.
+    pub fn e5rt_async_event_release(evt: AsyncEvent) -> E5rtErrorCode;
+
+    // ----- E5RT diagnostics -----
+
+    /// Static human-readable string for an `E5rtErrorCode` (e.g. `0` -> `"OK"`).
+    /// Returns a pointer to a static string literal owned by the framework
+    /// (never freed); verified for codes 0..=6.
+    ///
+    /// # Safety
+    /// Always safe to call; the result is a `'static` C string or null.
+    pub fn e5rt_error_code_get_string(code: E5rtErrorCode) -> *const c_char;
+
+    /// The calling thread's last E5RT error message (a thread-local buffer;
+    /// empty string when there is none).
+    ///
+    /// # Safety
+    /// Always safe to call; the result points to a thread-local buffer valid
+    /// until the next E5RT call on this thread.
+    pub fn e5rt_get_last_error_message() -> *const c_char;
 }

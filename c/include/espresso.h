@@ -267,6 +267,37 @@ e5rt_error_code_t e5rt_buffer_object_get_type(e5rt_buffer_object_t obj,
                                               uint32_t* out); /* writes 4 bytes */
 e5rt_error_code_t e5rt_buffer_object_release(e5rt_buffer_object_t obj);
 
+/* Async events — timeline synchronization.
+ *
+ * A timeline-semaphore primitive for ordering stream work: signal raises the
+ * value, sync_wait blocks until it reaches a target (or a timeout elapses).
+ * create is out-first; all return e5rt_error_code_t (0 == success). VERIFIED by
+ * calling: get_name round-tripped the supplied name; signal(v) then
+ * get_last_signaled_value returned v and sync_wait(v, ...) returned at once; the
+ * active future value round-tripped a set/get. Needs a warm E5RT runtime.
+ *
+ * Unbound (present but unverified): async_notify (callback),
+ * create_from_iosurface_shared_event / get_iosurface_shared_event (Metal). */
+typedef void* e5rt_async_event_t;
+
+e5rt_error_code_t e5rt_async_event_create(e5rt_async_event_t* out, const char* name,
+                                          uint32_t flags); /* only flags 0 verified */
+e5rt_error_code_t e5rt_async_event_signal(e5rt_async_event_t evt, uint64_t value);
+e5rt_error_code_t e5rt_async_event_sync_wait(e5rt_async_event_t evt, uint64_t value,
+                                             uint64_t timeout_ns);
+e5rt_error_code_t e5rt_async_event_get_last_signaled_value(e5rt_async_event_t evt, uint64_t* out);
+e5rt_error_code_t e5rt_async_event_get_active_future_value(e5rt_async_event_t evt, uint64_t* out);
+e5rt_error_code_t e5rt_async_event_set_active_future_value(e5rt_async_event_t evt, uint64_t value);
+e5rt_error_code_t e5rt_async_event_get_name(e5rt_async_event_t evt, const char** out);
+e5rt_error_code_t e5rt_async_event_release(e5rt_async_event_t evt);
+
+/* Diagnostics. error_code_get_string returns a static string literal (verified
+ * for codes 0..=6: OK / INVALID FUNCTION ARGUMENT / INVALID OPERATION /
+ * MEM ALLOC FAILURE / OUT OF BOUNDS ACCESS / INVALID TYPE PARAMETER /
+ * INVALID DATA TYPE). get_last_error_message returns a thread-local buffer. */
+const char* e5rt_error_code_get_string(e5rt_error_code_t code);
+const char* e5rt_get_last_error_message(void);
+
 #ifdef __cplusplus
 }
 #endif

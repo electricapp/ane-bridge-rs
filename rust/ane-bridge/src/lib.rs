@@ -3344,6 +3344,37 @@ impl StateModel {
         let rc = unsafe { sys::espresso::e5rt_buffer_object_alloc(&raw mut raw, nbytes, 0) };
         E5rtBuffer::from_create(rc, raw)
     }
+
+    /// Create a named E5RT timeline [`E5rtEvent`] on this model's warm runtime —
+    /// the synchronization primitive for ordering stream work.
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::InvalidArg`] if `name` contains a NUL byte;
+    /// [`sys::AneStatus::Unsupported`] if the runtime is not warm (predict
+    /// first); [`sys::AneStatus::Internal`] (with the framework message) if
+    /// creation fails.
+    pub fn create_event(&self, name: &str) -> Result<E5rtEvent<'_>> {
+        self.ensure_e5rt_warm()?;
+        let c = CString::new(name).map_err(|_nul| Error {
+            status: sys::AneStatus::InvalidArg,
+            message: "event name contains a NUL byte".into(),
+        })?;
+        let mut raw: sys::espresso::AsyncEvent = ptr::null_mut();
+        // SAFETY: runtime warm; `c` lives for the call; `raw` written on
+        // success; flags 0 is the verified option word.
+        let rc = unsafe { sys::espresso::e5rt_async_event_create(&raw mut raw, c.as_ptr(), 0) };
+        E5rtEvent::check_e5rt(rc, "e5rt_async_event_create")?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "e5rt_async_event_create returned OK but null handle".into(),
+            });
+        }
+        Ok(E5rtEvent {
+            raw,
+            _src: core::marker::PhantomData,
+        })
+    }
 }
 
 impl Drop for StateModel {
@@ -3363,6 +3394,25 @@ impl Drop for State {
 // =============================================================
 // E5RT buffer objects (zero-copy ANE I/O)
 // =============================================================
+
+/// Human-readable string for a raw `e5rt_error_code_t`.
+///
+/// Via Espresso's own `e5rt_error_code_get_string` (e.g. `0` → `"OK"`, `3` →
+/// `"MEM ALLOC FAILURE"`). Falls back to a placeholder for null / non-UTF-8.
+#[must_use]
+pub fn e5rt_error_string(code: i32) -> &'static str {
+    // SAFETY: always safe to call; returns a pointer to a `'static` string
+    // literal owned by the framework, or null.
+    let p = unsafe { sys::espresso::e5rt_error_code_get_string(code) };
+    if p.is_null() {
+        return "unknown e5rt error";
+    }
+    // SAFETY: `p` is a non-null, NUL-terminated static C string from the
+    // framework; valid for the program's lifetime, so `'static` is sound.
+    unsafe { CStr::from_ptr(p) }
+        .to_str()
+        .unwrap_or("invalid e5rt error string")
+}
 
 /// A zero-copy E5RT buffer object.
 ///
@@ -3406,7 +3456,10 @@ impl E5rtBuffer<'_> {
         if rc != 0 {
             return Err(Error {
                 status: sys::AneStatus::Internal,
-                message: format!("e5rt buffer creation failed (code {rc})"),
+                message: format!(
+                    "e5rt buffer creation failed: {} (code {rc})",
+                    e5rt_error_string(rc)
+                ),
             });
         }
         if raw.is_null() {
@@ -3483,5 +3536,147 @@ impl Drop for E5rtBuffer<'_> {
         // SAFETY: `self.raw` came from a verified `create_*` / `alloc` and is
         // released exactly once here.
         unsafe { sys::espresso::e5rt_buffer_object_release(self.raw) };
+    }
+}
+
+// =============================================================
+// E5RT async events (timeline synchronization)
+// =============================================================
+
+/// A timeline-semaphore event for ordering work on the E5RT runtime.
+///
+/// Signal it with a monotonically increasing `u64` value and wait for a target
+/// value (with a timeout). It is the synchronization primitive for the
+/// `e5rt_execution_stream` submit path. Construct via
+/// [`StateModel::create_event`]; drop releases it.
+///
+/// The `'src` lifetime ties the event to the [`StateModel`] whose warm runtime
+/// created it. Although a timeline event is conceptually a cross-thread fence,
+/// this wrapper is conservatively `Send` but not `Sync` (the C side's
+/// concurrency guarantees for these entry points are unverified); use
+/// [`Self::as_raw`] if you have established it is safe to drive concurrently.
+pub struct E5rtEvent<'src> {
+    /// Owning `e5rt_async_event` handle.
+    raw: sys::espresso::AsyncEvent,
+    /// Borrows the owning runtime for `'src`.
+    _src: core::marker::PhantomData<&'src ()>,
+}
+
+// SAFETY: the handle is a retained event object with no thread affinity; it can
+// move between threads. Deliberately not `Sync` — see the type docs.
+unsafe impl Send for E5rtEvent<'_> {}
+
+impl core::fmt::Debug for E5rtEvent<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("E5rtEvent")
+            .field("last_signaled", &self.last_signaled_value())
+            .finish_non_exhaustive()
+    }
+}
+
+impl E5rtEvent<'_> {
+    /// Map a non-zero `e5rt_error_code_t` to an [`Error`] with the framework's
+    /// own message; `Ok(())` on `0`.
+    fn check_e5rt(rc: sys::espresso::E5rtErrorCode, what: &str) -> Result<()> {
+        if rc == 0 {
+            return Ok(());
+        }
+        Err(Error {
+            status: sys::AneStatus::Internal,
+            message: format!("{what} failed: {} (code {rc})", e5rt_error_string(rc)),
+        })
+    }
+
+    /// Signal the event, raising its last-signaled value to `value`.
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::Internal`] (with the framework message) if the signal
+    /// fails.
+    pub fn signal(&self, value: u64) -> Result<()> {
+        // SAFETY: `self.raw` is a live event handle.
+        let rc = unsafe { sys::espresso::e5rt_async_event_signal(self.raw, value) };
+        Self::check_e5rt(rc, "e5rt_async_event_signal")
+    }
+
+    /// Block until the event's value reaches `value`, or `timeout` elapses.
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::Internal`] on timeout or failure (the framework
+    /// message distinguishes them).
+    pub fn wait(&self, value: u64, timeout: core::time::Duration) -> Result<()> {
+        let ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
+        // SAFETY: `self.raw` is a live event handle.
+        let rc = unsafe { sys::espresso::e5rt_async_event_sync_wait(self.raw, value, ns) };
+        Self::check_e5rt(rc, "e5rt_async_event_sync_wait")
+    }
+
+    /// The event's last-signaled value (`0` if the query fails).
+    #[must_use]
+    pub fn last_signaled_value(&self) -> u64 {
+        let mut out: u64 = 0;
+        // SAFETY: live handle; `out` is a writable u64.
+        let rc = unsafe {
+            sys::espresso::e5rt_async_event_get_last_signaled_value(self.raw, &raw mut out)
+        };
+        if rc == 0 { out } else { 0 }
+    }
+
+    /// The event's active future (pending target) value (`0` if unset / on
+    /// failure).
+    #[must_use]
+    pub fn active_future_value(&self) -> u64 {
+        let mut out: u64 = 0;
+        // SAFETY: live handle; `out` is a writable u64.
+        let rc = unsafe {
+            sys::espresso::e5rt_async_event_get_active_future_value(self.raw, &raw mut out)
+        };
+        if rc == 0 { out } else { 0 }
+    }
+
+    /// Set the event's active future (pending target) value.
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::Internal`] on failure.
+    pub fn set_active_future_value(&self, value: u64) -> Result<()> {
+        // SAFETY: `self.raw` is a live event handle.
+        let rc =
+            unsafe { sys::espresso::e5rt_async_event_set_active_future_value(self.raw, value) };
+        Self::check_e5rt(rc, "e5rt_async_event_set_active_future_value")
+    }
+
+    /// The event's name (the one it was created with), or `None` if
+    /// unavailable.
+    #[must_use]
+    pub fn name(&self) -> Option<String> {
+        let mut out: *const c_char = ptr::null();
+        // SAFETY: live handle; `out` is a writable pointer slot. On success the
+        // C side writes a borrowed, library-owned NUL-terminated string.
+        let rc = unsafe { sys::espresso::e5rt_async_event_get_name(self.raw, &raw mut out) };
+        if rc != 0 || out.is_null() {
+            return None;
+        }
+        // SAFETY: `out` is a non-null borrowed C string owned by the event; we
+        // copy it out immediately.
+        Some(
+            unsafe { CStr::from_ptr(out) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
+    /// The raw `e5rt_async_event` handle, for driving the rest of the `e5rt_*`
+    /// C-ABI (e.g. binding it as a stream operation's completion / dependent
+    /// event). Borrowed — do not release; the [`E5rtEvent`] owns it.
+    #[must_use]
+    pub const fn as_raw(&self) -> sys::espresso::AsyncEvent {
+        self.raw
+    }
+}
+
+impl Drop for E5rtEvent<'_> {
+    fn drop(&mut self) {
+        // SAFETY: `self.raw` came from a verified `e5rt_async_event_create` and
+        // is released exactly once here.
+        unsafe { sys::espresso::e5rt_async_event_release(self.raw) };
     }
 }
