@@ -14,6 +14,7 @@
  */
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 
 #include <pthread.h>
 #include <stdarg.h>
@@ -30,8 +31,12 @@
 static pthread_key_t g_state_err_key;
 static pthread_once_t g_state_err_once = PTHREAD_ONCE_INIT;
 
-static void state_err_destructor(void* p) { free(p); }
-static void state_err_key_init(void) { pthread_key_create(&g_state_err_key, state_err_destructor); }
+static void state_err_destructor(void* p) {
+    free(p);
+}
+static void state_err_key_init(void) {
+    pthread_key_create(&g_state_err_key, state_err_destructor);
+}
 
 __attribute__((format(printf, 1, 2))) static void state_err(const char* fmt, ...) {
     pthread_once(&g_state_err_once, state_err_key_init);
@@ -72,11 +77,11 @@ const char* ane_state_last_error(void) {
 /* ------------------------------------------------------------------ */
 
 struct AneStateModel {
-    MLModel* model;                       /* retained */
-    NSArray<NSString*>* in_names;         /* retained, sorted for stable index */
-    NSArray<NSString*>* out_names;        /* retained, sorted */
-    NSArray<NSString*>* state_names;      /* retained, sorted */
-    char** in_c;                          /* strdup'd C strings, NULL-terminated members */
+    MLModel* model;                  /* retained */
+    NSArray<NSString*>* in_names;    /* retained, sorted for stable index */
+    NSArray<NSString*>* out_names;   /* retained, sorted */
+    NSArray<NSString*>* state_names; /* retained, sorted */
+    char** in_c;                     /* strdup'd C strings, NULL-terminated members */
     char** out_c;
     char** state_c;
 };
@@ -138,42 +143,41 @@ static MLMultiArray* array_from_f32(MLFeatureDescription* fd, const float* src, 
     if (!c) {
         return nil;
     }
-    MLMultiArray* arr = [[[MLMultiArray alloc] initWithShape:c.shape
-                                                    dataType:c.dataType
+    MLMultiArray* arr = [[[MLMultiArray alloc] initWithShape:c.shape dataType:c.dataType
                                                        error:e] autorelease];
     if (!arr) {
         return nil;
     }
     __block BOOL ok = YES;
     [arr getMutableBytesWithHandler:^(void* ptr, NSInteger size, NSArray<NSNumber*>* strides) {
-      (void)strides;
-      if ((size_t)arr.count != count) {
-          ok = NO;
-          return;
-      }
-      /* Exhaustive over MLMultiArrayDataType (no default → -Wcovered-switch).
+        (void)strides;
+        if ((size_t)arr.count != count) {
+            ok = NO;
+            return;
+        }
+        /* Exhaustive over MLMultiArrayDataType (no default → -Wcovered-switch).
        * Unsupported-for-input dtypes fall to the trailing `ok = NO`. */
-      switch (c.dataType) {
-          case MLMultiArrayDataTypeFloat32:
-              if ((size_t)size >= count * sizeof(float)) {
-                  memcpy(ptr, src, count * sizeof(float));
-              } else {
-                  ok = NO;
-              }
-              break;
-          case MLMultiArrayDataTypeFloat16: {
-              __fp16* d = (__fp16*)ptr;
-              for (size_t i = 0; i < count; i++) {
-                  d[i] = (__fp16)src[i];
-              }
-              break;
-          }
-          case MLMultiArrayDataTypeDouble:
-          case MLMultiArrayDataTypeInt32:
-          case MLMultiArrayDataTypeInt8:
-              ok = NO;
-              break;
-      }
+        switch (c.dataType) {
+        case MLMultiArrayDataTypeFloat32:
+            if ((size_t)size >= count * sizeof(float)) {
+                memcpy(ptr, src, count * sizeof(float));
+            } else {
+                ok = NO;
+            }
+            break;
+        case MLMultiArrayDataTypeFloat16: {
+            __fp16* d = (__fp16*)ptr;
+            for (size_t i = 0; i < count; i++) {
+                d[i] = (__fp16)src[i];
+            }
+            break;
+        }
+        case MLMultiArrayDataTypeDouble:
+        case MLMultiArrayDataTypeInt32:
+        case MLMultiArrayDataTypeInt8:
+            ok = NO;
+            break;
+        }
     }];
     return ok ? arr : nil;
 }
@@ -186,34 +190,34 @@ static BOOL array_to_f32(MLMultiArray* arr, float* dst, size_t count) {
     }
     __block BOOL ok = YES;
     [arr getBytesWithHandler:^(const void* ptr, NSInteger size) {
-      /* Exhaustive over MLMultiArrayDataType (no default → -Wcovered-switch). */
-      switch (arr.dataType) {
-          case MLMultiArrayDataTypeFloat32:
-              if ((size_t)size >= count * sizeof(float)) {
-                  memcpy(dst, ptr, count * sizeof(float));
-              } else {
-                  ok = NO;
-              }
-              break;
-          case MLMultiArrayDataTypeFloat16: {
-              const __fp16* s = (const __fp16*)ptr;
-              for (size_t i = 0; i < count; i++) {
-                  dst[i] = (float)s[i];
-              }
-              break;
-          }
-          case MLMultiArrayDataTypeInt32: {
-              const int32_t* s = (const int32_t*)ptr;
-              for (size_t i = 0; i < count; i++) {
-                  dst[i] = (float)s[i];
-              }
-              break;
-          }
-          case MLMultiArrayDataTypeDouble:
-          case MLMultiArrayDataTypeInt8:
-              ok = NO;
-              break;
-      }
+        /* Exhaustive over MLMultiArrayDataType (no default → -Wcovered-switch). */
+        switch (arr.dataType) {
+        case MLMultiArrayDataTypeFloat32:
+            if ((size_t)size >= count * sizeof(float)) {
+                memcpy(dst, ptr, count * sizeof(float));
+            } else {
+                ok = NO;
+            }
+            break;
+        case MLMultiArrayDataTypeFloat16: {
+            const __fp16* s = (const __fp16*)ptr;
+            for (size_t i = 0; i < count; i++) {
+                dst[i] = (float)s[i];
+            }
+            break;
+        }
+        case MLMultiArrayDataTypeInt32: {
+            const int32_t* s = (const int32_t*)ptr;
+            for (size_t i = 0; i < count; i++) {
+                dst[i] = (float)s[i];
+            }
+            break;
+        }
+        case MLMultiArrayDataTypeDouble:
+        case MLMultiArrayDataTypeInt8:
+            ok = NO;
+            break;
+        }
     }];
     return ok;
 }
@@ -431,5 +435,50 @@ AneStatus ane_state_predict_f32(AneStateModel* m, AneState* s, const char* const
             }
         }
         return ANE_OK;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* E5RT escape hatch: borrow the live execution stream.               */
+/* ------------------------------------------------------------------ */
+
+/* Read an ivar's raw value (object or pointer) via the Obj-C runtime. */
+static void* ivar_value(id obj, const char* name) {
+    if (!obj) {
+        return NULL;
+    }
+    void* value = NULL;
+    object_getInstanceVariable(obj, name, &value);
+    return value;
+}
+
+void* ane_state_e5rt_stream(const AneStateModel* m) {
+    if (!m) {
+        return NULL;
+    }
+    @autoreleasepool {
+        /* MLModel._internalEngine (MLE5Engine) -> _streamPool
+         * (MLE5ExecutionStreamPool) -> _allStreams / _pool
+         * (NSSet<MLE5ExecutionStream>) -> any ._streamHandle
+         * (e5rt_execution_stream*). Private ivars; best-effort across OS
+         * versions, and nil until the engine has built a stream (i.e. before
+         * the first predict) or for non-MLE5 (non-stateful) models. */
+        id engine = (id)ivar_value(m->model, "_internalEngine");
+        id pool = (id)ivar_value(engine, "_streamPool");
+        if (!pool) {
+            return NULL;
+        }
+        id streams = (id)ivar_value(pool, "_allStreams");
+        if (![streams isKindOfClass:[NSSet class]] || [(NSSet*)streams count] == 0) {
+            streams = (id)ivar_value(pool, "_pool");
+        }
+        if (![streams isKindOfClass:[NSSet class]]) {
+            return NULL;
+        }
+        id stream = [(NSSet*)streams anyObject];
+        if (!stream) {
+            return NULL;
+        }
+        return ivar_value(stream, "_streamHandle");
     }
 }

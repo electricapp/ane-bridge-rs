@@ -711,6 +711,29 @@ pub struct Buffer {
 unsafe impl Send for Buffer {}
 
 impl Buffer {
+    /// Allocate a fresh `IOSurface`-backed buffer of `nbytes`, independent of
+    /// any open model. Same allocation as [`Model::buffer`], but usable on its
+    /// own — e.g. to hand an `IOSurface` to [`StateModel::wrap_buffer`] for
+    /// zero-copy E5RT I/O.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::Oom`] if the kernel refuses the
+    /// `IOSurfaceCreate` request, or a framework error otherwise.
+    pub fn new(nbytes: usize) -> Result<Self> {
+        let mut raw: *mut sys::AneBuffer = ptr::null_mut();
+        // SAFETY: `ane_buffer_create` allocates an IOSurface; `out` need only
+        // be a valid `**`. Model-independent.
+        let status = unsafe { sys::ane_buffer_create(nbytes, &raw mut raw) };
+        check(status)?;
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "ane_buffer_create returned OK but null handle".into(),
+            });
+        }
+        Ok(Self { raw })
+    }
+
     /// Buffer size in bytes.
     #[must_use]
     pub fn nbytes(&self) -> usize {
@@ -3190,6 +3213,137 @@ impl StateModel {
         };
         state_check(status)
     }
+
+    /// Borrow the live `e5rt_execution_stream` `CoreML` built for this model —
+    /// the `E5RT` runtime under `MLE5Engine` — as a raw pointer, or null for a
+    /// non-MLE5 model or before the first [`Self::predict`] has built it.
+    ///
+    /// Escape hatch for driving the raw `e5rt_*` C-ABI (priority/QoS, async
+    /// events, …) on the same entitlement-free stream. The pointer is borrowed
+    /// (owned by the engine); do not release it, and do not use it past the
+    /// lifetime of this [`StateModel`].
+    #[must_use]
+    pub fn e5rt_stream_handle(&self) -> *mut c_void {
+        // SAFETY: `self.raw` is a live model handle; the C side returns a
+        // borrowed pointer or null.
+        unsafe { sys::ane_state_e5rt_stream(self.raw) }
+    }
+
+    /// Stream id of this model's live E5RT execution stream, or `None` if no
+    /// stream is available yet (see [`Self::e5rt_stream_handle`]).
+    #[must_use]
+    pub fn e5rt_stream_id(&self) -> Option<u64> {
+        let stream = self.e5rt_stream_handle();
+        if stream.is_null() {
+            return None;
+        }
+        // SAFETY: `stream` is a live, non-null `e5rt_execution_stream*` just
+        // borrowed from the engine; `get_stream_id` only reads it.
+        Some(unsafe { sys::espresso::e5rt_execution_stream_get_stream_id(stream) })
+    }
+
+    /// Error unless this model's E5RT runtime is warm — i.e. at least one
+    /// [`Self::predict`] has built the execution stream. The
+    /// `e5rt_buffer_object_*` factory dereferences an uninitialized provider
+    /// (and crashes) when called cold, so every buffer constructor gates here.
+    fn ensure_e5rt_warm(&self) -> Result<()> {
+        if self.e5rt_stream_handle().is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Unsupported,
+                message: "E5RT runtime not warm: call predict() at least once before \
+                          creating E5RT buffers"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Wrap a [`Buffer`]'s `IOSurface` as a zero-copy [`E5rtBuffer`] — the same
+    /// ANE-resident bytes, no copy. The result borrows both this model (whose
+    /// warm runtime owns the E5RT context) and `buf` (which owns the surface),
+    /// so it cannot outlive either.
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::Unsupported`] if the runtime is not warm (predict
+    /// first); [`sys::AneStatus::Internal`] if the framework rejects the surface.
+    pub fn wrap_buffer<'src>(&'src self, buf: &'src Buffer) -> Result<E5rtBuffer<'src>> {
+        // SAFETY: `buf.iosurface_ref()` is a live surface owned by `buf`, which
+        // the returned `E5rtBuffer<'src>` borrows for `'src` (via `buf: &'src _`).
+        unsafe { self.wrap_iosurface(buf.iosurface_ref()) }
+    }
+
+    /// Wrap a raw `IOSurfaceRef` (as a pointer) as a zero-copy [`E5rtBuffer`].
+    ///
+    /// # Safety
+    /// `surface` must be a live `IOSurfaceRef` that outlives the returned
+    /// buffer (tie it to a value of lifetime `'b`). Prefer
+    /// [`Self::wrap_buffer`].
+    ///
+    /// # Errors
+    /// As [`Self::wrap_buffer`].
+    pub unsafe fn wrap_iosurface(&self, surface: *mut c_void) -> Result<E5rtBuffer<'_>> {
+        self.ensure_e5rt_warm()?;
+        let mut raw: sys::espresso::BufferObject = ptr::null_mut();
+        // SAFETY: runtime is warm (checked above); `surface` is a live
+        // IOSurfaceRef per the contract; `raw` is written on success.
+        let rc = unsafe {
+            sys::espresso::e5rt_buffer_object_create_from_iosurface(&raw mut raw, surface)
+        };
+        E5rtBuffer::from_create(rc, raw)
+    }
+
+    /// Wrap a raw `id<MTLBuffer>` (as a pointer) as a zero-copy [`E5rtBuffer`]
+    /// for GPU interop.
+    ///
+    /// # Safety
+    /// `mtlbuffer` must be a live `id<MTLBuffer>` outliving the returned buffer.
+    ///
+    /// # Errors
+    /// As [`Self::wrap_buffer`].
+    pub unsafe fn wrap_mtlbuffer(&self, mtlbuffer: *mut c_void) -> Result<E5rtBuffer<'_>> {
+        self.ensure_e5rt_warm()?;
+        let mut raw: sys::espresso::BufferObject = ptr::null_mut();
+        // SAFETY: runtime warm; `mtlbuffer` live per contract; `raw` written
+        // on success.
+        let rc = unsafe {
+            sys::espresso::e5rt_buffer_object_create_from_mtlbuffer(&raw mut raw, mtlbuffer)
+        };
+        E5rtBuffer::from_create(rc, raw)
+    }
+
+    /// Wrap a host byte region as a zero-copy [`E5rtBuffer`].
+    ///
+    /// # Safety
+    /// `data` must be valid for `len` bytes and outlive the returned buffer.
+    ///
+    /// # Errors
+    /// As [`Self::wrap_buffer`].
+    pub unsafe fn wrap_data(&self, data: *mut c_void, len: usize) -> Result<E5rtBuffer<'_>> {
+        self.ensure_e5rt_warm()?;
+        let mut raw: sys::espresso::BufferObject = ptr::null_mut();
+        // SAFETY: runtime warm; `data`/`len` valid per contract; `raw` written
+        // on success.
+        let rc = unsafe {
+            sys::espresso::e5rt_buffer_object_create_from_data_pointer(&raw mut raw, data, len)
+        };
+        E5rtBuffer::from_create(rc, raw)
+    }
+
+    /// Allocate a fresh ANE-resident [`E5rtBuffer`] of `nbytes` (type-0
+    /// backing — the only buffer type verified). Useful as resident scratch /
+    /// I/O that never leaves the ANE.
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::Unsupported`] if the runtime is not warm;
+    /// [`sys::AneStatus::Internal`] on framework failure.
+    pub fn alloc_buffer(&self, nbytes: usize) -> Result<E5rtBuffer<'_>> {
+        self.ensure_e5rt_warm()?;
+        let mut raw: sys::espresso::BufferObject = ptr::null_mut();
+        // SAFETY: runtime warm; `raw` written on success; type 0 is the
+        // verified backing class.
+        let rc = unsafe { sys::espresso::e5rt_buffer_object_alloc(&raw mut raw, nbytes, 0) };
+        E5rtBuffer::from_create(rc, raw)
+    }
 }
 
 impl Drop for StateModel {
@@ -3203,5 +3357,131 @@ impl Drop for State {
     fn drop(&mut self) {
         // SAFETY: `self.raw` came from `ane_state_create` and is dropped once.
         unsafe { sys::ane_state_release(self.raw) };
+    }
+}
+
+// =============================================================
+// E5RT buffer objects (zero-copy ANE I/O)
+// =============================================================
+
+/// A zero-copy E5RT buffer object.
+///
+/// Wraps an existing `IOSurface` / `MTLBuffer` / host region, or freshly
+/// allocated ANE memory, as an `e5rt_buffer_object` for the runtime beneath
+/// `MLE5Engine`. Construct via [`StateModel::wrap_buffer`],
+/// [`StateModel::alloc_buffer`], or the raw `wrap_*` escape hatches. Drop
+/// releases the wrapper — not your surface.
+///
+/// The `'src` lifetime ties the wrapper to whatever owns the backing memory
+/// (the source [`Buffer`] and the [`StateModel`] whose warm runtime created
+/// it), so the handle cannot dangle.
+pub struct E5rtBuffer<'src> {
+    /// Owning `e5rt_buffer_object` handle.
+    raw: sys::espresso::BufferObject,
+    /// Borrows the backing memory's owner(s) for `'src`.
+    _src: core::marker::PhantomData<&'src ()>,
+}
+
+// SAFETY: an `e5rt_buffer_object` is a retained provider handle with no thread
+// affinity; like [`Buffer`] it can move between threads. Not `Sync` — the C
+// side makes no interior-mutation guarantees.
+unsafe impl Send for E5rtBuffer<'_> {}
+
+impl core::fmt::Debug for E5rtBuffer<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("E5rtBuffer")
+            .field("size", &self.size())
+            .field("type", &self.raw_type())
+            .finish_non_exhaustive()
+    }
+}
+
+impl E5rtBuffer<'_> {
+    /// Validate a `create_*` / `alloc` result (`0` code + non-null handle) and
+    /// wrap it, or surface the failure.
+    fn from_create(
+        rc: sys::espresso::E5rtErrorCode,
+        raw: sys::espresso::BufferObject,
+    ) -> Result<Self> {
+        if rc != 0 {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: format!("e5rt buffer creation failed (code {rc})"),
+            });
+        }
+        if raw.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "e5rt buffer creation returned OK but null handle".into(),
+            });
+        }
+        Ok(Self {
+            raw,
+            _src: core::marker::PhantomData,
+        })
+    }
+
+    /// Byte size of the buffer (the backing surface's allocation size, which
+    /// may exceed the logical request); `0` if the query fails.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        let mut out: usize = 0;
+        // SAFETY: `self.raw` is a live buffer object; `out` is a writable usize.
+        let rc = unsafe { sys::espresso::e5rt_buffer_object_get_size(self.raw, &raw mut out) };
+        if rc == 0 { out } else { 0 }
+    }
+
+    /// Raw 32-bit type tag (enum not reversed; `0` for the verified backings).
+    #[must_use]
+    pub fn raw_type(&self) -> u32 {
+        let mut out: u32 = 0;
+        // SAFETY: live handle; `out` is a writable u32 (the call writes 4 bytes).
+        let rc = unsafe { sys::espresso::e5rt_buffer_object_get_type(self.raw, &raw mut out) };
+        if rc == 0 { out } else { 0 }
+    }
+
+    /// Borrowed backing `IOSurfaceRef` as a raw pointer, or null if this buffer
+    /// is not `IOSurface`-backed. Do not release.
+    #[must_use]
+    pub fn iosurface_ref(&self) -> *mut c_void {
+        let mut out: *mut c_void = ptr::null_mut();
+        // SAFETY: live handle; `out` is a writable pointer slot.
+        let rc = unsafe { sys::espresso::e5rt_buffer_object_get_iosurface(self.raw, &raw mut out) };
+        if rc == 0 { out } else { ptr::null_mut() }
+    }
+
+    /// Borrowed backing `id<MTLBuffer>` as a raw pointer, or null if this
+    /// buffer is not `MTLBuffer`-backed. Do not release.
+    #[must_use]
+    pub fn mtlbuffer(&self) -> *mut c_void {
+        let mut out: *mut c_void = ptr::null_mut();
+        // SAFETY: live handle; `out` is a writable pointer slot.
+        let rc = unsafe { sys::espresso::e5rt_buffer_object_get_mtlbuffer(self.raw, &raw mut out) };
+        if rc == 0 { out } else { ptr::null_mut() }
+    }
+
+    /// Host data pointer for the buffer, or null if unavailable.
+    #[must_use]
+    pub fn data_ptr(&self) -> *mut c_void {
+        let mut out: *mut c_void = ptr::null_mut();
+        // SAFETY: live handle; `out` is a writable pointer slot.
+        let rc = unsafe { sys::espresso::e5rt_buffer_object_get_data_ptr(self.raw, &raw mut out) };
+        if rc == 0 { out } else { ptr::null_mut() }
+    }
+
+    /// The raw `e5rt_buffer_object` handle, for driving the rest of the
+    /// `e5rt_*` C-ABI (e.g. binding it as a stream I/O port). Borrowed — do
+    /// not release; the [`E5rtBuffer`] owns it.
+    #[must_use]
+    pub const fn as_raw(&self) -> sys::espresso::BufferObject {
+        self.raw
+    }
+}
+
+impl Drop for E5rtBuffer<'_> {
+    fn drop(&mut self) {
+        // SAFETY: `self.raw` came from a verified `create_*` / `alloc` and is
+        // released exactly once here.
+        unsafe { sys::espresso::e5rt_buffer_object_release(self.raw) };
     }
 }

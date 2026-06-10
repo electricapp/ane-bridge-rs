@@ -85,7 +85,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use ane_bridge::StateModel;
+use ane_bridge::{Buffer, StateModel};
 use tempfile::TempDir;
 
 /// Repo root: two levels up from this crate's manifest dir.
@@ -175,6 +175,43 @@ fn state_accumulates_in_place_across_calls() {
     }
 }
 
+/// E5RT escape hatch: after a predict has built the engine's stream, the live
+/// `e5rt_execution_stream` is reachable and reports a valid stream id — the
+/// beachhead for driving the raw `e5rt_*` runtime on the same stream.
+#[test]
+fn e5rt_stream_is_reachable_after_predict() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+    let in_name = m.input_names()[0].clone();
+    let out_name = m.output_names()[0].clone();
+
+    // The engine builds its execution stream lazily — none before first predict.
+    let mut state = m.new_state().expect("new state");
+    let mut out = [0.0_f32];
+    m.predict(
+        &mut state,
+        &[(in_name.as_str(), &[1.0])],
+        &mut [(out_name.as_str(), &mut out[..])],
+    )
+    .expect("predict");
+
+    assert!(
+        !m.e5rt_stream_handle().is_null(),
+        "a stateful model routes through MLE5Engine — its e5rt_execution_stream \
+         should be reachable after the first predict"
+    );
+    // The raw `e5rt_*` C-ABI is callable on the borrowed handle. The id value
+    // itself is engine-internal (the pool may hold several streams), so we only
+    // assert it reads back without UB, not a specific value.
+    let id = m
+        .e5rt_stream_id()
+        .expect("stream id readable on the borrowed stream");
+    println!("borrowed e5rt_execution_stream id = {id}");
+}
+
 /// A fresh `State` starts from zero — proving each state is independent and the
 /// resident buffer is per-`State`, not global.
 #[test]
@@ -211,5 +248,102 @@ fn fresh_state_resets_accumulation() {
         (out[0] - 1.0).abs() < 1e-3,
         "a fresh state must accumulate from zero, got {}",
         out[0]
+    );
+}
+
+/// Warm the model's E5RT runtime with one throwaway predict, so the
+/// `e5rt_buffer_object_*` factory has a live runtime to build against.
+fn warm(m: &StateModel) {
+    let in_name = m.input_names()[0].clone();
+    let out_name = m.output_names()[0].clone();
+    let mut state = m.new_state().expect("new state");
+    let mut out = [0.0_f32];
+    m.predict(
+        &mut state,
+        &[(in_name.as_str(), &[1.0])],
+        &mut [(out_name.as_str(), &mut out[..])],
+    )
+    .expect("warmup predict");
+}
+
+/// The zero-copy headline: an `IOSurface`-backed [`Buffer`] wrapped as an
+/// E5RT buffer object exposes the *same* surface — no copy. After warming the
+/// runtime, `wrap_buffer` must round-trip the surface pointer and report a
+/// size at least the logical request.
+#[test]
+fn e5rt_buffer_wraps_iosurface_zero_copy() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+    warm(&m);
+
+    let buf = Buffer::new(4096).expect("allocate IOSurface buffer");
+    let e5 = m
+        .wrap_buffer(&buf)
+        .expect("wrap buffer as e5rt buffer object");
+
+    assert_eq!(
+        e5.iosurface_ref(),
+        buf.iosurface_ref(),
+        "the e5rt buffer must wrap the very same IOSurface (zero copy)"
+    );
+    assert!(
+        !e5.iosurface_ref().is_null(),
+        "wrapped IOSurface must be reachable"
+    );
+    assert!(
+        e5.size() >= buf.nbytes(),
+        "e5rt buffer size {} should cover the {}-byte surface",
+        e5.size(),
+        buf.nbytes()
+    );
+    println!(
+        "wrapped IOSurface zero-copy: e5rt size={}, surface round-trips",
+        e5.size()
+    );
+}
+
+/// A fresh `alloc_buffer` gives an ANE-resident buffer with a real,
+/// host-visible data pointer and the requested size.
+#[test]
+fn e5rt_buffer_alloc_is_resident() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+    warm(&m);
+
+    let e5 = m.alloc_buffer(2048).expect("alloc e5rt buffer");
+    assert!(
+        e5.size() >= 2048,
+        "alloc'd buffer should be at least 2048 bytes, got {}",
+        e5.size()
+    );
+    assert!(
+        !e5.data_ptr().is_null(),
+        "a freshly allocated buffer should expose a host data pointer"
+    );
+}
+
+/// The safety gate: creating an E5RT buffer before any predict (cold runtime)
+/// must return an error, not crash — the C factory would segfault on an
+/// uninitialized provider, so the wrapper refuses up front.
+#[test]
+fn e5rt_buffer_creation_requires_warm_runtime() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+    // Deliberately NO predict: the runtime is cold.
+    let err = m
+        .alloc_buffer(2048)
+        .expect_err("cold-runtime buffer creation must be refused, not crash");
+    assert!(
+        matches!(err.status, ane_bridge::sys::AneStatus::Unsupported),
+        "expected Unsupported for a cold runtime, got {err:?}"
     );
 }

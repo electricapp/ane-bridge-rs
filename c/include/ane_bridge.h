@@ -661,6 +661,14 @@ AneStatus ane_state_predict_f32(AneStateModel* m, AneState* s, const char* const
 /* Most recent error on this thread from an ane_state_* call, or NULL. */
 const char* ane_state_last_error(void);
 
+/* Escape hatch to the E5RT runtime under MLE5Engine: returns the live
+ * `e5rt_execution_stream*` CoreML built for this model (cast the `void*` after
+ * the right e5rt headers), or NULL for a non-MLE5 model or before the first
+ * predict has built the stream. Lets callers drive the raw `e5rt_*` C-ABI
+ * (stream id, priority/QoS, async events) on the same entitlement-free stream.
+ * The handle is borrowed — owned by the engine; do not release it. */
+void* ane_state_e5rt_stream(const AneStateModel* m);
+
 /* =====================================================================
  * Internal test hooks (NOT part of the stable API)
  *

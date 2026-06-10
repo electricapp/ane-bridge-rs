@@ -61,6 +61,17 @@ pub struct ErrorInfo {
     _private: [u8; 0],
 }
 
+/// Opaque `e5rt_buffer_object` handle.
+///
+/// A retained ANE memory provider wrapping an `IOSurface`, `MTLBuffer`, host
+/// pointer, or freshly allocated ANE memory. Touch only through the
+/// `e5rt_buffer_object_*` accessors.
+pub type BufferObject = *mut c_void;
+
+/// `e5rt_error_code_t`: `0` is success, non-zero is a failure code (the
+/// concrete enum is not reversed). Returned by the buffer-object entry points.
+pub type E5rtErrorCode = c_int;
+
 unsafe extern "C" {
     // ----- Context -----
 
@@ -335,4 +346,137 @@ unsafe extern "C" {
         rank: *mut usize,
         dims: *mut usize,
     );
+
+    // ----- E5RT execution stream (opaque handle) -----
+    //
+    // The E5RT runtime beneath MLE5Engine. Handles (`e5rt_execution_stream*`,
+    // etc.) are opaque pointers; functions return an `e5rt_error_code_t` and
+    // use out-params. Borrow a live stream from a loaded model via
+    // `crate::ane_state_e5rt_stream`. Only the verified-signature subset is
+    // bound so far; the broader `e5rt_*` surface (292 symbols, all present per
+    // the `espresso_symbols` canary) is future work.
+
+    /// Stream id of an `e5rt_execution_stream` (verified: returns the live id).
+    ///
+    /// # Safety
+    /// `stream` must be a live `e5rt_execution_stream*` (e.g. from
+    /// [`crate::ane_state_e5rt_stream`]); it is borrowed, not consumed.
+    pub fn e5rt_execution_stream_get_stream_id(stream: *mut c_void) -> u64;
+
+    // ----- E5RT buffer objects (zero-copy ANE I/O) -----
+    //
+    // Wrap an existing `IOSurface`, `MTLBuffer`, or host pointer as an
+    // `e5rt_buffer_object` (no copy), or allocate fresh ANE memory; the
+    // getters round-trip the backing handle and size. All return an
+    // `E5rtErrorCode` (`0` == success); the `create_*` / `alloc` entry points
+    // take the out-handle **first**, then their inputs (the getters take the
+    // handle first, then the out-param — the opposite order). Signatures were
+    // recovered by `lldb` AND verified by calling them: every create/alloc
+    // produced a live handle whose `get_*` round-tripped the original surface /
+    // `MTLBuffer` / pointer and reported the right size (see `tools/` probes).
+    //
+    // PRECONDITION (verified): the process-global E5RT runtime must already be
+    // up, or `create_from_iosurface` and friends dereference an uninitialized
+    // provider and crash. An `MLE5Engine` prediction brings it up; the safe
+    // wrapper gates on a live `e5rt_execution_stream` before calling these.
+    //
+    // The 11th symbol, `e5rt_buffer_object_create_as_alias`, is present (see
+    // the `espresso_symbols` canary) but unverified, so it is not bound here.
+
+    /// Wrap an `IOSurfaceRef` as a buffer object (no copy). `out` is written on
+    /// success. Verified: `get_iosurface` round-trips the same surface.
+    ///
+    /// # Safety
+    /// `out` must be a writable `*mut BufferObject`; `surface` a live
+    /// `IOSurfaceRef`. The E5RT runtime must be warm (see the section note).
+    /// Release the result with [`e5rt_buffer_object_release`].
+    pub fn e5rt_buffer_object_create_from_iosurface(
+        out: *mut BufferObject,
+        surface: *mut c_void,
+    ) -> E5rtErrorCode;
+
+    /// Wrap a host pointer + byte length as a buffer object (no copy).
+    ///
+    /// # Safety
+    /// `out` must be writable; `data` must be valid for `size` bytes and
+    /// outlive the buffer object. Runtime must be warm.
+    pub fn e5rt_buffer_object_create_from_data_pointer(
+        out: *mut BufferObject,
+        data: *mut c_void,
+        size: usize,
+    ) -> E5rtErrorCode;
+
+    /// Wrap an `id<MTLBuffer>` as a buffer object (no copy). Verified:
+    /// `get_mtlbuffer` round-trips the same `MTLBuffer`.
+    ///
+    /// # Safety
+    /// `out` must be writable; `mtlbuffer` a live `id<MTLBuffer>`. Runtime
+    /// must be warm.
+    pub fn e5rt_buffer_object_create_from_mtlbuffer(
+        out: *mut BufferObject,
+        mtlbuffer: *mut c_void,
+    ) -> E5rtErrorCode;
+
+    /// Allocate a fresh ANE buffer of `size` bytes. `buffer_type` selects the
+    /// backing class; only `0` is verified (its `get_data_ptr` returns a live,
+    /// page-aligned pointer). The concrete type enum is not reversed.
+    ///
+    /// # Safety
+    /// `out` must be writable. Runtime must be warm.
+    pub fn e5rt_buffer_object_alloc(
+        out: *mut BufferObject,
+        size: usize,
+        buffer_type: u32,
+    ) -> E5rtErrorCode;
+
+    /// Write the buffer's host data pointer to `*out`.
+    ///
+    /// # Safety
+    /// `obj` must be a live buffer object; `out` a writable `*mut *mut c_void`.
+    pub fn e5rt_buffer_object_get_data_ptr(
+        obj: BufferObject,
+        out: *mut *mut c_void,
+    ) -> E5rtErrorCode;
+
+    /// Write the buffer's backing `IOSurfaceRef` to `*out` (errors if the
+    /// buffer is not `IOSurface`-backed).
+    ///
+    /// # Safety
+    /// `obj` must be live; `out` a writable `*mut *mut c_void` (an
+    /// `IOSurfaceRef*`).
+    pub fn e5rt_buffer_object_get_iosurface(
+        obj: BufferObject,
+        out: *mut *mut c_void,
+    ) -> E5rtErrorCode;
+
+    /// Write the buffer's backing `id<MTLBuffer>` to `*out` (errors if the
+    /// buffer is not `MTLBuffer`-backed).
+    ///
+    /// # Safety
+    /// `obj` must be live; `out` a writable `*mut *mut c_void`.
+    pub fn e5rt_buffer_object_get_mtlbuffer(
+        obj: BufferObject,
+        out: *mut *mut c_void,
+    ) -> E5rtErrorCode;
+
+    /// Write the buffer's byte size to `*out`.
+    ///
+    /// # Safety
+    /// `obj` must be live; `out` a writable `*mut usize`.
+    pub fn e5rt_buffer_object_get_size(obj: BufferObject, out: *mut usize) -> E5rtErrorCode;
+
+    /// Write the buffer's type tag to `*out` (a 32-bit value; the enum is not
+    /// reversed — `0` observed for `IOSurface` / pointer / `MTLBuffer` backings).
+    ///
+    /// # Safety
+    /// `obj` must be live; `out` a writable `*mut u32` (the call writes exactly
+    /// four bytes — verified with a 64-bit sentinel).
+    pub fn e5rt_buffer_object_get_type(obj: BufferObject, out: *mut u32) -> E5rtErrorCode;
+
+    /// Release a buffer object (drops the provider's reference to the backing
+    /// surface / buffer / allocation).
+    ///
+    /// # Safety
+    /// `obj` must be a live buffer object, released exactly once.
+    pub fn e5rt_buffer_object_release(obj: BufferObject) -> E5rtErrorCode;
 }

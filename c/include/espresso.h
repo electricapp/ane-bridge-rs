@@ -218,6 +218,55 @@ void espresso_buffer_set_rank(espresso_buffer_t* buf, size_t rank);
 void espresso_buffer_pack_tensor_shape(espresso_buffer_t* buf, size_t rank, const size_t* dims);
 void espresso_buffer_unpack_tensor_shape(const espresso_buffer_t* buf, size_t* rank, size_t* dims);
 
+/* =====================================================================
+ * E5RT runtime (the engine beneath MLE5Engine)
+ * ===================================================================== */
+
+typedef void* e5rt_execution_stream_t; /* opaque execution stream         */
+typedef void* e5rt_buffer_object_t;    /* opaque ANE memory provider      */
+typedef int e5rt_error_code_t;         /* 0 == success; enum not reversed */
+
+/* Stream id of a live execution stream. Borrow a stream from a loaded model
+ * (the MLE5Engine path) rather than creating one here. VERIFIED. */
+uint64_t e5rt_execution_stream_get_stream_id(e5rt_execution_stream_t stream);
+
+/* Buffer objects — zero-copy ANE I/O.
+ *
+ * Wrap an existing IOSurface / MTLBuffer / host pointer as an
+ * e5rt_buffer_object (no copy), or allocate fresh ANE memory; the getters
+ * round-trip the backing handle and size. All return e5rt_error_code_t
+ * (0 == success). NOTE the argument convention: create_* / alloc take the
+ * OUT handle FIRST then their inputs; the get_* accessors take the handle
+ * first then the out-param (the opposite order).
+ *
+ * Signatures were recovered from arm64 disassembly AND verified by calling:
+ * each create/alloc produced a live handle whose get_* round-tripped the
+ * original surface / MTLBuffer / pointer and reported the right size (see the
+ * /tmp probe in the commit message / tools).
+ *
+ * PRECONDITION (verified): the process-global E5RT runtime must already be up
+ * or these dereference an uninitialized provider and crash. One MLE5Engine
+ * prediction brings it up; the Rust wrapper gates on a live execution stream.
+ *
+ * e5rt_buffer_object_create_as_alias exists but is UNVERIFIED and omitted. */
+e5rt_error_code_t e5rt_buffer_object_create_from_iosurface(e5rt_buffer_object_t* out,
+                                                           void* surface /* IOSurfaceRef */);
+e5rt_error_code_t e5rt_buffer_object_create_from_data_pointer(e5rt_buffer_object_t* out, void* data,
+                                                              size_t size);
+e5rt_error_code_t e5rt_buffer_object_create_from_mtlbuffer(e5rt_buffer_object_t* out,
+                                                           void* mtlbuffer /* id<MTLBuffer> */);
+e5rt_error_code_t e5rt_buffer_object_alloc(e5rt_buffer_object_t* out, size_t size,
+                                           uint32_t buffer_type); /* only type 0 verified */
+e5rt_error_code_t e5rt_buffer_object_get_data_ptr(e5rt_buffer_object_t obj, void** out);
+e5rt_error_code_t e5rt_buffer_object_get_iosurface(e5rt_buffer_object_t obj,
+                                                   void** out /* IOSurfaceRef* */);
+e5rt_error_code_t e5rt_buffer_object_get_mtlbuffer(e5rt_buffer_object_t obj,
+                                                   void** out /* id<MTLBuffer>* */);
+e5rt_error_code_t e5rt_buffer_object_get_size(e5rt_buffer_object_t obj, size_t* out);
+e5rt_error_code_t e5rt_buffer_object_get_type(e5rt_buffer_object_t obj,
+                                              uint32_t* out); /* writes 4 bytes */
+e5rt_error_code_t e5rt_buffer_object_release(e5rt_buffer_object_t obj);
+
 #ifdef __cplusplus
 }
 #endif

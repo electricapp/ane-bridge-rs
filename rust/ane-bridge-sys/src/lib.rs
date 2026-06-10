@@ -1336,6 +1336,16 @@ unsafe extern "C" {
     /// Returned pointer is valid until the next `ane_state_*` call on this thread.
     pub fn ane_state_last_error() -> *const c_char;
 
+    /// Borrow the live `e5rt_execution_stream*` `CoreML` built for `m` (the
+    /// `E5RT` runtime under `MLE5Engine`), or null for a non-MLE5 model /
+    /// before the first predict. The handle is owned by the engine — do not
+    /// release it.
+    ///
+    /// # Safety
+    /// `m` must be a live handle from [`ane_state_model_open`]. The returned
+    /// pointer is borrowed and valid only while `m` (and its engine) live.
+    pub fn ane_state_e5rt_stream(m: *const AneStateModel) -> *mut c_void;
+
     /// Internal: run a single adversarial case through the C-side
     /// `LiveInputList` parser. Not stable API.
     pub fn _ane_internal_fuzz_parse_one(fc: *const AneFuzzCase) -> AneStatus;
