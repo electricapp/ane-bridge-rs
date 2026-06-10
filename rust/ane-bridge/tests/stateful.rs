@@ -634,6 +634,59 @@ fn e5rt_runner_drives_inference() {
     println!("drove ANE inference via E5rtRunner; final output = {prev:?}");
 }
 
+/// The async drive: `execute_async` submits the op and returns an in-flight
+/// handle; `wait` blocks for completion. Same accumulation invariant as the sync
+/// drive (each input-1.0 step raises the resident-state mean by exactly 1.0),
+/// proving the async submit + completion-block path runs the ANE op into our
+/// buffer.
+#[test]
+fn e5rt_runner_drives_inference_async() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+    let in_feat = m.input_names()[0].clone();
+    let out_feat = m.output_names()[0].clone();
+    let mut state = m.new_state().expect("new state");
+    let mut warm_out = [0.0_f32];
+    m.predict(
+        &mut state,
+        &[(in_feat.as_str(), &[1.0])],
+        &mut [(out_feat.as_str(), &mut warm_out[..])],
+    )
+    .expect("warm predict");
+
+    let ops = m.e5rt_operations();
+    let in_port = ops[0].input_names()[0].clone();
+    let out_port = ops[0].output_names()[0].clone();
+    let mut runner = m.e5rt_runner().expect("build runner");
+    let inbuf = m.alloc_buffer(256).expect("alloc input buffer");
+    let outbuf = m.alloc_buffer(256).expect("alloc output buffer");
+    inbuf.write_f32(&[1.0]).expect("write input");
+
+    let mut prev: Option<f32> = None;
+    for step in 0..3 {
+        // Bind the I/O slices to locals so the in-flight handle can borrow them.
+        let ins = [(in_port.as_str(), &inbuf)];
+        let outs = [(out_port.as_str(), &outbuf)];
+        let flight = runner.execute_async(&ins, &outs).expect("submit async");
+        flight.wait().expect("await async completion");
+        let mut out_val = [0.0_f32];
+        outbuf.read_f32(&mut out_val).expect("read output");
+        let got = out_val[0];
+        if let Some(p) = prev {
+            assert!(
+                (got - p - 1.0).abs() < 1e-3,
+                "each async drive adds 1.0 to the resident-state mean: step {step}, prev {p}, got {got}"
+            );
+        }
+        prev = Some(got);
+    }
+    drop(state);
+    println!("drove ANE inference async via E5rtRunner; final output = {prev:?}");
+}
+
 /// The runner is gated on a warm runtime: before any predict there is no loaded
 /// operation, so building one is refused (not a crash).
 #[test]

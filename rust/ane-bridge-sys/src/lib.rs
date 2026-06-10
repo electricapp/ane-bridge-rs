@@ -1370,6 +1370,21 @@ unsafe extern "C" {
     /// pointer is borrowed and valid only while `m` (and its engine) live.
     pub fn ane_state_e5rt_operation_at(m: *const AneStateModel, idx: c_int) -> *mut c_void;
 
+    /// Submit `stream`'s encoded work asynchronously (wrapping `cb`/`ctx` in the
+    /// completion block). Returns the submit status (`0` ok, `-1` on
+    /// null/unavailable). `cb(ctx, arg0, arg1, err)` fires once on completion
+    /// (`err` is the `e5rt_error*`, null on success).
+    ///
+    /// # Safety
+    /// `stream` must be a live `e5rt_execution_stream*` with encoded work; `cb`
+    /// a valid callback; `ctx` whatever `cb` expects. The buffers bound to the
+    /// operation must stay alive until `cb` fires.
+    pub fn ane_state_e5rt_submit_async(
+        stream: *mut c_void,
+        cb: Option<unsafe extern "C" fn(*mut c_void, u64, u64, *const c_void)>,
+        ctx: *mut c_void,
+    ) -> c_int;
+
     /// Internal: run a single adversarial case through the C-side
     /// `LiveInputList` parser. Not stable API.
     pub fn _ane_internal_fuzz_parse_one(fc: *const AneFuzzCase) -> AneStatus;

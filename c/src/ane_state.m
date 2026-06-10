@@ -16,6 +16,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 
+#include <dlfcn.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -558,4 +559,37 @@ void* ane_state_e5rt_operation_at(const AneStateModel* m, int idx) {
         id op = [(NSArray*)ops objectAtIndex:(NSUInteger)idx];
         return ivar_value(op, "_operationHandle");
     }
+}
+
+/* e5rt_execution_stream_submit_async, resolved lazily. Espresso is not linked
+ * into this dylib (only the Rust sys crate links it), so we dlsym it instead of
+ * referencing it directly — which also keeps the standalone `make` build (no
+ * -framework Espresso) linking. The completion block type is
+ * void(^)(uint64_t, uint64_t, e5rt_error*). */
+typedef int (*ane_e5rt_submit_async_fn)(void*, void (^)(uint64_t, uint64_t, void*));
+static ane_e5rt_submit_async_fn g_submit_async = NULL;
+static pthread_once_t g_submit_once = PTHREAD_ONCE_INIT;
+
+static void load_submit_async(void) {
+    void* handle =
+        dlopen("/System/Library/PrivateFrameworks/Espresso.framework/Espresso", RTLD_NOW);
+    if (handle) {
+        g_submit_async =
+            (ane_e5rt_submit_async_fn)dlsym(handle, "e5rt_execution_stream_submit_async");
+    }
+}
+
+int ane_state_e5rt_submit_async(void* stream, AneE5rtCompletion cb, void* ctx) {
+    if (!stream || !cb) {
+        return -1;
+    }
+    pthread_once(&g_submit_once, load_submit_async);
+    if (!g_submit_async) {
+        return -1;
+    }
+    /* The framework copies (objc_retainBlock) this block, so the stack block is
+     * fine; it fires `cb(ctx, ...)` once on completion. */
+    return g_submit_async(stream, ^(uint64_t arg0, uint64_t arg1, void* err) {
+        cb(ctx, arg0, arg1, err);
+    });
 }

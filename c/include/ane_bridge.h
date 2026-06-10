@@ -685,6 +685,18 @@ int ane_state_e5rt_operation_count(const AneStateModel* m);
  * introspectors on it. */
 void* ane_state_e5rt_operation_at(const AneStateModel* m, int idx);
 
+/* C completion callback for ane_state_e5rt_submit_async: `err` is the
+ * `e5rt_error*` (NULL on success); `arg0`/`arg1` are the framework's completion
+ * values. Fired once, on the framework's completion thread. */
+typedef void (*AneE5rtCompletion)(void* ctx, uint64_t arg0, uint64_t arg1, const void* err);
+
+/* Submit the stream's encoded work asynchronously (e5rt_execution_stream_-
+ * submit_async), wrapping `cb`/`ctx` in the completion block the framework
+ * expects. Returns the submit status (0 on success; -1 if `stream`/`cb` is NULL
+ * or the symbol is unavailable). `cb(ctx, ...)` runs once when the work
+ * completes. The caller must keep the bound buffers alive until then. */
+int ane_state_e5rt_submit_async(void* stream, AneE5rtCompletion cb, void* ctx);
+
 /* =====================================================================
  * Internal test hooks (NOT part of the stable API)
  *

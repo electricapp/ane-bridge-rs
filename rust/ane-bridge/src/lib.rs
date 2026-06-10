@@ -4260,6 +4260,59 @@ impl E5rtRunner<'_> {
         inputs: &[(&str, &E5rtBuffer<'_>)],
         outputs: &[(&str, &E5rtBuffer<'_>)],
     ) -> Result<()> {
+        let stream = self.bind_and_encode(inputs, outputs)?;
+        // SAFETY: `stream` is live and now has encoded work.
+        let exec_rc = unsafe { sys::espresso::e5rt_execution_stream_execute_sync(stream) };
+        e5rt_check(exec_rc, "e5rt_execution_stream_execute_sync")
+    }
+
+    /// Submit one inference step **asynchronously**: bind `inputs` / `outputs`
+    /// and `submit_async` the encoded work, returning an [`E5rtInflight`]. The
+    /// host can do other work while the ANE runs; [`E5rtInflight::wait`] blocks
+    /// for the result (dropping the handle also waits, so the ANE never writes
+    /// into freed buffers). The runner and bound buffers stay borrowed until the
+    /// handle resolves.
+    ///
+    /// # Errors
+    /// As [`Self::execute`], plus [`sys::AneStatus::Internal`] if the async
+    /// submit fails.
+    pub fn execute_async<'io>(
+        &'io mut self,
+        inputs: &'io [(&str, &E5rtBuffer<'_>)],
+        outputs: &'io [(&str, &E5rtBuffer<'_>)],
+    ) -> Result<E5rtInflight<'io>> {
+        let stream = self.bind_and_encode(inputs, outputs)?;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<bool>(1);
+        let ctx: *mut c_void = Box::into_raw(Box::new(tx)).cast();
+        // SAFETY: `stream` is live with encoded work; `e5rt_async_trampoline` is
+        // a valid callback; `ctx` is the boxed sender it expects. The bound
+        // buffers stay alive (borrowed for `'io`) until the completion fires.
+        let rc =
+            unsafe { sys::ane_state_e5rt_submit_async(stream, Some(e5rt_async_trampoline), ctx) };
+        if rc != 0 {
+            // The block never fired; reclaim the leaked sender box.
+            // SAFETY: `ctx` came from `Box::into_raw` just above and was not
+            // consumed (no completion ran).
+            drop(unsafe { Box::from_raw(ctx.cast::<std::sync::mpsc::SyncSender<bool>>()) });
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: format!("ane_state_e5rt_submit_async failed (rc {rc})"),
+            });
+        }
+        Ok(E5rtInflight {
+            rx,
+            done: false,
+            _io: core::marker::PhantomData,
+        })
+    }
+
+    /// Reset the stream, prepare the op, bind I/O by name, and encode — the
+    /// shared setup before a sync or async run. Returns the live stream handle.
+    fn bind_and_encode(
+        &mut self,
+        inputs: &[(&str, &E5rtBuffer<'_>)],
+        outputs: &[(&str, &E5rtBuffer<'_>)],
+    ) -> Result<*mut c_void> {
         let stream = self.model.e5rt_stream_handle();
         if stream.is_null() {
             return Err(Error {
@@ -4300,8 +4353,76 @@ impl E5rtRunner<'_> {
         let encode_rc =
             unsafe { sys::espresso::e5rt_execution_stream_encode_operation(stream, self.op) };
         e5rt_check(encode_rc, "e5rt_execution_stream_encode_operation")?;
-        // SAFETY: `stream` is live and now has encoded work.
-        let exec_rc = unsafe { sys::espresso::e5rt_execution_stream_execute_sync(stream) };
-        e5rt_check(exec_rc, "e5rt_execution_stream_execute_sync")
+        Ok(stream)
+    }
+}
+
+/// Completion trampoline for async E5RT submits: recover the boxed sender and
+/// report success (`err` null) exactly once.
+///
+/// # Safety
+/// `ctx` must be the `Box<SyncSender<bool>>` leaked by [`E5rtRunner::execute_async`];
+/// the framework fires this exactly once, so it is reclaimed here.
+unsafe extern "C" fn e5rt_async_trampoline(
+    ctx: *mut c_void,
+    _arg0: u64,
+    _arg1: u64,
+    err: *const c_void,
+) {
+    // SAFETY: per the contract, `ctx` is the boxed sender; reclaim and drop it.
+    let tx: Box<std::sync::mpsc::SyncSender<bool>> = unsafe { Box::from_raw(ctx.cast()) };
+    // Best-effort: a closed channel just means the handle was already waited on.
+    tx.send(err.is_null()).unwrap_or(());
+}
+
+/// A handle to an in-flight async E5RT submission ([`E5rtRunner::execute_async`]).
+///
+/// The runner and bound buffers stay borrowed (`'io`) until this resolves.
+/// [`Self::wait`] blocks for the result; dropping the handle also blocks, so the
+/// ANE never writes into freed buffers.
+pub struct E5rtInflight<'io> {
+    /// Receives `true` on success (`err` null) when the completion fires.
+    rx: std::sync::mpsc::Receiver<bool>,
+    /// Whether the completion has already been consumed.
+    done: bool,
+    /// Borrows the runner + bound buffers for `'io`.
+    _io: core::marker::PhantomData<&'io ()>,
+}
+
+impl E5rtInflight<'_> {
+    /// Block until the ANE finishes the submitted work.
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::Internal`] if the completion reported an error or the
+    /// channel closed before firing.
+    pub fn wait(mut self) -> Result<()> {
+        self.wait_inner()
+    }
+
+    /// Block once for the completion; idempotent (so `Drop` can also wait).
+    fn wait_inner(&mut self) -> Result<()> {
+        if self.done {
+            return Ok(());
+        }
+        self.done = true;
+        match self.rx.recv() {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "e5rt async completion reported an error".into(),
+            }),
+            Err(_recv) => Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "e5rt async completion channel closed before firing".into(),
+            }),
+        }
+    }
+}
+
+impl Drop for E5rtInflight<'_> {
+    fn drop(&mut self) {
+        // Block until completion so the ANE is not still writing into the
+        // about-to-be-freed borrowed buffers.
+        drop(self.wait_inner());
     }
 }
