@@ -204,6 +204,10 @@ for `predict` — the saved overhead matters most for small, frequent calls such
 as autoregressive KV-cache decode (one drive per token). Benchmark it with
 `cargo run --example e5rt_drive -- <state.mlmodelc>`.
 
+`runner.execute_async(&ins, &outs)?` submits without blocking and returns an
+`E5rtInflight` handle: do other host work, then `.wait()` for completion
+(dropping the handle also waits, so the ANE never writes into freed buffers).
+
 The loaded graph is also introspectable read-only — `m.e5rt_program_library()`
 (functions, e5 bundle path) and `m.e5rt_operations()` (op name, I/O names) — and
 the broader `e5rt_*` runtime is bound under `ane_bridge::sys::espresso`: zero-copy
