@@ -653,3 +653,72 @@ fn e5rt_runner_requires_warm_runtime() {
         "expected Unsupported for a cold runtime, got {err:?}"
     );
 }
+
+/// Our drive and ordinary `predict` coexist on the same model and SHARE the
+/// resident state: a `predict`, then a drive, then a `predict` — each step (all
+/// feeding 1.0) raises the mean by exactly 1.0, proving `predict` still works
+/// after we reset/drive the borrowed stream and that both see the same on-device
+/// KV-cache.
+#[test]
+fn e5rt_drive_and_predict_share_state() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+    let in_feat = m.input_names()[0].clone();
+    let out_feat = m.output_names()[0].clone();
+    let mut state = m.new_state().expect("new state");
+
+    // predict #1 (warms; cache 0 -> 1).
+    let mut o1 = [0.0_f32];
+    m.predict(
+        &mut state,
+        &[(in_feat.as_str(), &[1.0])],
+        &mut [(out_feat.as_str(), &mut o1[..])],
+    )
+    .expect("predict #1");
+
+    // our drive (input 1.0): reads the resident state, cache -> 2.
+    let ops = m.e5rt_operations();
+    let in_port = ops[0].input_names()[0].clone();
+    let out_port = ops[0].output_names()[0].clone();
+    let mut runner = m.e5rt_runner().expect("runner");
+    let inbuf = m.alloc_buffer(256).expect("input buffer");
+    let outbuf = m.alloc_buffer(256).expect("output buffer");
+    // SAFETY: host-visible alloc'd buffer of 256 bytes (>= 4).
+    unsafe { *inbuf.data_ptr().cast::<f32>() = 1.0 };
+    runner
+        .execute(
+            &[(in_port.as_str(), &inbuf)],
+            &[(out_port.as_str(), &outbuf)],
+        )
+        .expect("drive");
+    // SAFETY: scalar fp32 output after a successful drive.
+    let drive_out = unsafe { *outbuf.data_ptr().cast::<f32>() };
+
+    // predict #2 with the SAME state: must still work AND see the drive's update.
+    let mut o2 = [0.0_f32];
+    m.predict(
+        &mut state,
+        &[(in_feat.as_str(), &[1.0])],
+        &mut [(out_feat.as_str(), &mut o2[..])],
+    )
+    .expect("predict #2 after our drive");
+
+    assert!(
+        (drive_out - o1[0] - 1.0).abs() < 1e-3,
+        "drive must read the state predict left: predict {} -> drive {drive_out}",
+        o1[0]
+    );
+    assert!(
+        (o2[0] - drive_out - 1.0).abs() < 1e-3,
+        "predict after drive must work and see the drive's state update: drive {drive_out} -> predict {}",
+        o2[0]
+    );
+    drop(state);
+    println!(
+        "predict<->drive share state: {} -> {drive_out} -> {}",
+        o1[0], o2[0]
+    );
+}
