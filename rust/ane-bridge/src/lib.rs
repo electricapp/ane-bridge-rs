@@ -3458,6 +3458,39 @@ impl StateModel {
             })
             .collect()
     }
+
+    /// Build an [`E5rtRunner`] that re-drives this model's compiled operation on
+    /// the ANE with your own [`E5rtBuffer`] I/O — entitlement-free inference with
+    /// the resident state kept on-device, interleavable with [`Self::predict`].
+    ///
+    /// Uses the model's first operation. Requires at least one prior
+    /// [`Self::predict`] (which builds + loads the operation).
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::Unsupported`] if the runtime is not warm or no
+    /// operation is available yet (predict first).
+    pub fn e5rt_runner(&self) -> Result<E5rtRunner<'_>> {
+        if self.e5rt_stream_handle().is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Unsupported,
+                message: "E5RT stream not available: call predict() at least once first".into(),
+            });
+        }
+        // SAFETY: `self.raw` is a live model handle; returns a borrowed,
+        // engine-owned operation handle or null.
+        let op = unsafe { sys::ane_state_e5rt_operation_at(self.raw, 0) };
+        if op.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Unsupported,
+                message: "no E5RT operation available: call predict() at least once first".into(),
+            });
+        }
+        Ok(E5rtRunner {
+            model: self,
+            op,
+            ports: Vec::new(),
+        })
+    }
 }
 
 impl Drop for StateModel {
@@ -4075,5 +4108,145 @@ impl E5rtOperation<'_> {
     #[must_use]
     pub const fn as_raw(&self) -> sys::espresso::Operation {
         self.raw
+    }
+}
+
+// =============================================================
+// E5RT inference drive (reuse the engine's loaded operation)
+// =============================================================
+
+/// Drives ANE inference by re-running the engine's loaded operation.
+///
+/// Re-runs the operation an `MLE5Engine` already compiled + loaded, on the
+/// borrowed stream, with caller-supplied [`E5rtBuffer`] I/O — entitlement-free,
+/// with the resident state (KV cache) kept on-device across calls.
+///
+/// Build one with [`StateModel::e5rt_runner`] after at least one
+/// [`StateModel::predict`] (which compiles + loads the operation). Each
+/// [`Self::execute`] resets the stream, binds your input/output buffers to the
+/// operation's ports by name, encodes, and runs synchronously. Inout (state)
+/// ports are left bound to the engine's resident buffers, so state persists and
+/// is shared with ordinary `predict` calls.
+///
+/// Ports are retained from the engine once per name and reused (a small,
+/// bounded borrow — the engine co-owns them, and releasing an io port aborts,
+/// so they are never released).
+pub struct E5rtRunner<'model> {
+    /// The model whose borrowed stream + operation this drives.
+    model: &'model StateModel,
+    /// Borrowed, engine-owned operation handle.
+    op: sys::espresso::Operation,
+    /// Cached retained ports: `(name, is_input, port)`.
+    ports: Vec<(String, bool, sys::espresso::IoPort)>,
+}
+
+impl core::fmt::Debug for E5rtRunner<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("E5rtRunner")
+            .field("ports", &self.ports.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl E5rtRunner<'_> {
+    /// Retain (once) and cache the named input/output port.
+    fn cached_port(&mut self, name: &str, is_input: bool) -> Result<sys::espresso::IoPort> {
+        // Field access (`.0`/`.1`/`.2`) rather than a tuple pattern keeps the
+        // `pattern_type_mismatch` restriction lint happy on the borrowed entry.
+        if let Some(entry) = self
+            .ports
+            .iter()
+            .find(|entry| entry.0 == name && entry.1 == is_input)
+        {
+            return Ok(entry.2);
+        }
+        let c = CString::new(name).map_err(|_nul| Error {
+            status: sys::AneStatus::InvalidArg,
+            message: "port name contains a NUL byte".into(),
+        })?;
+        let mut port: sys::espresso::IoPort = ptr::null_mut();
+        // Pick the entry point first (safe), so the `unsafe` block holds exactly
+        // one operation (the call).
+        let retain = if is_input {
+            sys::espresso::e5rt_execution_stream_operation_retain_input_port
+        } else {
+            sys::espresso::e5rt_execution_stream_operation_retain_output_port
+        };
+        // SAFETY: `self.op` is a live engine-owned operation; `c` lives for the
+        // call; `port` is written on success. The port is engine-co-owned and
+        // never released (cached and reused).
+        let rc = unsafe { retain(self.op, c.as_ptr(), &raw mut port) };
+        e5rt_check(rc, "e5rt_execution_stream_operation_retain_port")?;
+        if port.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Internal,
+                message: format!("retain port '{name}' returned OK but null handle"),
+            });
+        }
+        self.ports.push((name.to_owned(), is_input, port));
+        Ok(port)
+    }
+
+    /// Run one inference step: bind `inputs` / `outputs` (by port name) to the
+    /// operation's ports and execute synchronously on the ANE. The resident
+    /// state is read + updated in place on-device; only the bound I/O crosses
+    /// the host boundary.
+    ///
+    /// Write inputs into their [`E5rtBuffer`]s before calling, and read outputs
+    /// after; the buffers must be sized for the operation's tensors.
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::Unsupported`] if the stream is gone (predict first);
+    /// [`sys::AneStatus::InvalidArg`] for a NUL in a name;
+    /// [`sys::AneStatus::Internal`] (with the framework message) if any e5rt
+    /// step fails (e.g. a buffer that does not fit its port).
+    pub fn execute(
+        &mut self,
+        inputs: &[(&str, &E5rtBuffer<'_>)],
+        outputs: &[(&str, &E5rtBuffer<'_>)],
+    ) -> Result<()> {
+        let stream = self.model.e5rt_stream_handle();
+        if stream.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Unsupported,
+                message: "E5RT stream not available: call predict() at least once first".into(),
+            });
+        }
+        // SAFETY: `stream` is a live engine-owned execution stream. Reset then
+        // prepare must precede binding/encoding (verified ordering).
+        let reset_rc = unsafe { sys::espresso::e5rt_execution_stream_reset(stream) };
+        e5rt_check(reset_rc, "e5rt_execution_stream_reset")?;
+        // SAFETY: `self.op` is a live engine-owned operation.
+        let prep_rc = unsafe {
+            sys::espresso::e5rt_execution_stream_operation_prepare_op_for_encode(self.op)
+        };
+        e5rt_check(
+            prep_rc,
+            "e5rt_execution_stream_operation_prepare_op_for_encode",
+        )?;
+        // Field access (`.0`/`.1`) avoids the `pattern_type_mismatch` lint on
+        // the borrowed `(name, buffer)` pairs.
+        for pair in inputs {
+            let port = self.cached_port(pair.0, true)?;
+            // SAFETY: `port` is a live io port; `pair.1` is a live buffer object.
+            // Binding after reset is the verified order.
+            let bind_rc =
+                unsafe { sys::espresso::e5rt_io_port_bind_buffer_object(port, pair.1.as_raw()) };
+            e5rt_check(bind_rc, "e5rt_io_port_bind_buffer_object (input)")?;
+        }
+        for pair in outputs {
+            let port = self.cached_port(pair.0, false)?;
+            // SAFETY: `port` is a live io port; `pair.1` is a live buffer object.
+            let bind_rc =
+                unsafe { sys::espresso::e5rt_io_port_bind_buffer_object(port, pair.1.as_raw()) };
+            e5rt_check(bind_rc, "e5rt_io_port_bind_buffer_object (output)")?;
+        }
+        // SAFETY: `stream` and `self.op` are live; the ports are bound.
+        let encode_rc =
+            unsafe { sys::espresso::e5rt_execution_stream_encode_operation(stream, self.op) };
+        e5rt_check(encode_rc, "e5rt_execution_stream_encode_operation")?;
+        // SAFETY: `stream` is live and now has encoded work.
+        let exec_rc = unsafe { sys::espresso::e5rt_execution_stream_execute_sync(stream) };
+        e5rt_check(exec_rc, "e5rt_execution_stream_execute_sync")
     }
 }

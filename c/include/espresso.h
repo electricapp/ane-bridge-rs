@@ -439,6 +439,38 @@ e5rt_error_code_t
 e5rt_execution_stream_operation_get_inout_names(e5rt_execution_stream_operation_t op,
                                                 uint64_t count, const char** out_names);
 
+/* Inference drive — reuse the engine's loaded operation (READ/WRITE).
+ *
+ * Re-drive the operation an MLE5Engine already compiled+loaded, on its borrowed
+ * stream, binding OUR OWN buffer objects to the I/O ports -- no compiler, no
+ * create_*, no entitlement. VERIFIED end to end on the warm fixture: the
+ * sequence below ran the ANE op into a bound output buffer (cache 1.0 + input
+ * 5.0 => 6.0), the resident state accumulated across repeated drives, and CoreML
+ * predict kept working afterward (shared state):
+ *   reset(stream); prepare_op_for_encode(op);
+ *   retain_input_port(op,name,&p)/retain_output_port; bind_buffer_object(p,buf);
+ *   encode_operation(stream,op); execute_sync(stream); // read the output buffer
+ * Ordering facts: bind_buffer_object must come AFTER reset (before reset it
+ * returns 2); retained io ports are engine-co-owned -- reuse, never release. */
+typedef void* e5rt_io_port_t;
+
+e5rt_error_code_t e5rt_execution_stream_reset(void* stream);
+e5rt_error_code_t
+e5rt_execution_stream_operation_prepare_op_for_encode(e5rt_execution_stream_operation_t op);
+e5rt_error_code_t e5rt_execution_stream_encode_operation(void* stream,
+                                                         e5rt_execution_stream_operation_t op);
+e5rt_error_code_t e5rt_execution_stream_execute_sync(void* stream);
+e5rt_error_code_t
+e5rt_execution_stream_operation_retain_input_port(e5rt_execution_stream_operation_t op,
+                                                  const char* name, e5rt_io_port_t* out_port);
+e5rt_error_code_t
+e5rt_execution_stream_operation_retain_output_port(e5rt_execution_stream_operation_t op,
+                                                   const char* name, e5rt_io_port_t* out_port);
+e5rt_error_code_t
+e5rt_execution_stream_operation_retain_inout_port(e5rt_execution_stream_operation_t op,
+                                                  const char* name, e5rt_io_port_t* out_port);
+e5rt_error_code_t e5rt_io_port_bind_buffer_object(e5rt_io_port_t port, e5rt_buffer_object_t buffer);
+
 #ifdef __cplusplus
 }
 #endif

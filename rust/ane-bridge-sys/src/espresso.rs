@@ -119,6 +119,13 @@ pub type ProgramLibrary = *mut c_void;
 /// not release).
 pub type Operation = *mut c_void;
 
+/// Opaque `e5rt_io_port` handle — one I/O port of an [`Operation`].
+///
+/// Obtained by name via `e5rt_execution_stream_operation_retain_*_port` and
+/// bound to a [`BufferObject`]. Engine-co-owned: reuse, never release (releasing
+/// an io port aborts).
+pub type IoPort = *mut c_void;
+
 unsafe extern "C" {
     // ----- Context -----
 
@@ -1029,4 +1036,81 @@ unsafe extern "C" {
         count: u64,
         out_names: *mut *const c_char,
     ) -> E5rtErrorCode;
+
+    // ----- E5RT inference drive (reuse the engine's loaded operation) -----
+    //
+    // Re-drive the operation an MLE5Engine already compiled + loaded, on its
+    // borrowed stream, with OUR OWN buffer objects bound to the I/O ports — no
+    // compiler, no `create_*`, no entitlement. Verified end to end on the warm
+    // fixture: the sequence
+    //   reset(stream); prepare_op_for_encode(op);
+    //   retain_input_port(op,name,&p)/retain_output_port; bind_buffer_object(p,buf);
+    //   encode_operation(stream,op); execute_sync(stream)
+    // ran the ANE op into a bound output buffer (e.g. cache 1.0 + input 5.0 =>
+    // 6.0), the resident state accumulated across repeated drives, and CoreML
+    // `predict` kept working afterward (shared state). Two ordering facts:
+    // `bind_buffer_object` must come AFTER `reset` (before reset it returns
+    // `2`), and the retained ports are engine-co-owned — reuse them, never
+    // release (releasing an io port aborts).
+
+    /// Reset the stream's encoded work + bindings (call before each re-encode).
+    /// # Safety
+    /// `stream` must be a live `e5rt_execution_stream*` (borrowed).
+    pub fn e5rt_execution_stream_reset(stream: *mut c_void) -> E5rtErrorCode;
+
+    /// Prepare an operation for (re-)encoding.
+    /// # Safety
+    /// `op` must be a live, engine-owned operation.
+    pub fn e5rt_execution_stream_operation_prepare_op_for_encode(op: Operation) -> E5rtErrorCode;
+
+    /// Encode a prepared operation onto the stream.
+    /// # Safety
+    /// `stream` live; `op` a prepared, engine-owned operation. Call after
+    /// [`e5rt_execution_stream_reset`].
+    pub fn e5rt_execution_stream_encode_operation(
+        stream: *mut c_void,
+        op: Operation,
+    ) -> E5rtErrorCode;
+
+    /// Execute the stream's encoded work synchronously.
+    /// # Safety
+    /// `stream` must be a live `e5rt_execution_stream*` with encoded work.
+    pub fn e5rt_execution_stream_execute_sync(stream: *mut c_void) -> E5rtErrorCode;
+
+    /// Retain (by name) an operation's input I/O port; written to `*out_port`.
+    /// Engine-co-owned: reuse, do not release.
+    /// # Safety
+    /// `op` live; `name` a valid NUL-terminated C string; `out_port` writable.
+    pub fn e5rt_execution_stream_operation_retain_input_port(
+        op: Operation,
+        name: *const c_char,
+        out_port: *mut IoPort,
+    ) -> E5rtErrorCode;
+
+    /// Retain (by name) an operation's output I/O port. As
+    /// [`e5rt_execution_stream_operation_retain_input_port`].
+    /// # Safety
+    /// As [`e5rt_execution_stream_operation_retain_input_port`].
+    pub fn e5rt_execution_stream_operation_retain_output_port(
+        op: Operation,
+        name: *const c_char,
+        out_port: *mut IoPort,
+    ) -> E5rtErrorCode;
+
+    /// Retain (by name) an operation's inout (e.g. state) I/O port. As
+    /// [`e5rt_execution_stream_operation_retain_input_port`].
+    /// # Safety
+    /// As [`e5rt_execution_stream_operation_retain_input_port`].
+    pub fn e5rt_execution_stream_operation_retain_inout_port(
+        op: Operation,
+        name: *const c_char,
+        out_port: *mut IoPort,
+    ) -> E5rtErrorCode;
+
+    /// Bind a buffer object to an I/O port (call AFTER
+    /// [`e5rt_execution_stream_reset`], before encode).
+    /// # Safety
+    /// `port` must be a live io port (from a `retain_*_port`); `buffer` a live
+    /// [`BufferObject`] whose size/layout suits the port.
+    pub fn e5rt_io_port_bind_buffer_object(port: IoPort, buffer: BufferObject) -> E5rtErrorCode;
 }

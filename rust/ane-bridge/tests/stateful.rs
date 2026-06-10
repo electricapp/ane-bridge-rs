@@ -573,3 +573,83 @@ fn e5rt_operations_empty_before_predict() {
         "no operations should be reachable before the first predict"
     );
 }
+
+/// The capstone: drive ANE inference ourselves via [`ane_bridge::E5rtRunner`],
+/// reusing the engine's already-compiled operation with our own buffers —
+/// entitlement-free. The resident KV-cache accumulates across drives, so feeding
+/// input 1.0 each time must raise the output mean by exactly 1.0 per drive,
+/// proving the state stays on-device and our I/O buffers carry input/output.
+#[test]
+fn e5rt_runner_drives_inference() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+
+    // Warm, keeping a state alive so the engine's resident state buffer persists.
+    let in_feat = m.input_names()[0].clone();
+    let out_feat = m.output_names()[0].clone();
+    let mut state = m.new_state().expect("new state");
+    let mut o = [0.0_f32];
+    m.predict(
+        &mut state,
+        &[(in_feat.as_str(), &[1.0])],
+        &mut [(out_feat.as_str(), &mut o[..])],
+    )
+    .expect("warm predict");
+
+    // The runner binds by the operation's port names (what bind expects).
+    let ops = m.e5rt_operations();
+    let in_port = ops[0].input_names()[0].clone();
+    let out_port = ops[0].output_names()[0].clone();
+
+    let mut runner = m.e5rt_runner().expect("build runner");
+    let inbuf = m.alloc_buffer(256).expect("alloc input buffer");
+    let outbuf = m.alloc_buffer(256).expect("alloc output buffer");
+    assert!(
+        !inbuf.data_ptr().is_null() && !outbuf.data_ptr().is_null(),
+        "alloc'd buffers must be host-visible"
+    );
+    // SAFETY: `inbuf` is a host-visible alloc'd buffer of 256 bytes (>= 4).
+    unsafe { *inbuf.data_ptr().cast::<f32>() = 1.0 };
+
+    let mut prev: Option<f32> = None;
+    for step in 0..4 {
+        runner
+            .execute(
+                &[(in_port.as_str(), &inbuf)],
+                &[(out_port.as_str(), &outbuf)],
+            )
+            .expect("drive inference");
+        // SAFETY: `outbuf` holds the scalar fp32 output after a successful drive.
+        let got = unsafe { *outbuf.data_ptr().cast::<f32>() };
+        if let Some(p) = prev {
+            assert!(
+                (got - p - 1.0).abs() < 1e-3,
+                "each drive adds input 1.0 to the resident-state mean: step {step}, prev {p}, got {got}"
+            );
+        }
+        prev = Some(got);
+    }
+    drop(state);
+    println!("drove ANE inference via E5rtRunner; final output = {prev:?}");
+}
+
+/// The runner is gated on a warm runtime: before any predict there is no loaded
+/// operation, so building one is refused (not a crash).
+#[test]
+fn e5rt_runner_requires_warm_runtime() {
+    let dir = TempDir::new().expect("tempdir");
+    let Some(path) = build_fixture(dir.path()) else {
+        return;
+    };
+    let m = StateModel::open(&path).expect("open state model");
+    let err = m
+        .e5rt_runner()
+        .expect_err("a cold runtime has no operation to drive");
+    assert!(
+        matches!(err.status, ane_bridge::sys::AneStatus::Unsupported),
+        "expected Unsupported for a cold runtime, got {err:?}"
+    );
+}
