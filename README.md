@@ -177,6 +177,40 @@ let mut y = vec![0.0_f32; m.output_count("y")];
 m.predict(&mut state, &[("x", &x)], &mut [("y", &mut y)])?; // state updates in place
 ```
 
+### Driving inference directly via E5RT (`~13×` lower per-call overhead)
+
+Beneath `predict`, CoreML compiles your model into an
+`e5rt_execution_stream_operation` on an ANE execution stream. `ane-bridge` can
+reach that loaded operation and **re-drive it directly** — binding your own
+zero-copy buffer objects to its I/O ports — skipping CoreML's per-call `MLState`
+/ feature-provider wrapping. The resident state (KV cache) stays on the ANE and
+is shared with ordinary `predict`; no ANE entitlement is needed.
+
+```rust
+let m = StateModel::open("model.mlmodelc")?;
+let mut state = m.new_state()?;
+let mut y = vec![0.0_f32; 1];
+m.predict(&mut state, &[("x", &[1.0])], &mut [("y", &mut y)])?; // compiles + loads the op
+
+let mut runner = m.e5rt_runner()?;             // reuse the loaded operation
+let xb = m.alloc_buffer(256)?;                 // your own ANE buffer objects
+let yb = m.alloc_buffer(256)?;
+// write your input into xb (via xb.data_ptr()), then:
+runner.execute(&[("x", &xb)], &[("y", &yb)])?; // drives the ANE op; read yb
+```
+
+On a small accumulator model this drives the op at `~2.5 µs`/call vs `~32 µs`
+for `predict` — the saved overhead matters most for small, frequent calls such
+as autoregressive KV-cache decode (one drive per token). Benchmark it with
+`cargo run --example e5rt_drive -- <state.mlmodelc>`.
+
+The loaded graph is also introspectable read-only — `m.e5rt_program_library()`
+(functions, e5 bundle path) and `m.e5rt_operations()` (op name, I/O names) — and
+the broader `e5rt_*` runtime is bound under `ane_bridge::sys::espresso`: zero-copy
+buffer / surface objects, timeline async events, stream QoS / ANE priority, the
+GPU compute device, and the `CVPixelBuffer` 4CC ↔ surface-format converters —
+all signature-verified by calling on macOS 26.2.
+
 ## Async
 
 `submit` is non-blocking. Multiple `Request` objects can overlap
