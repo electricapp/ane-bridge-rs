@@ -1146,6 +1146,14 @@ AneStatus ane_request_bind_input(AneRequest* r, int32_t i, AneBuffer* b) {
         set_last_error("invalid arg");
         return ANE_ERR_INVALID_ARG;
     }
+    /* An in-flight eval reads the currently bound surfaces via DMA;
+     * swapping a binding under it races the payload pages and lets the
+     * caller free the old Buffer while the engine still reads it. Same
+     * guard as set_input_bytes. */
+    if (atomic_load(&r->in_flight) != 0) {
+        set_last_error("cannot bind_input while a submission is in flight");
+        return ANE_ERR_BUSY;
+    }
     if (i < 0 || i >= r->model->num_inputs) {
         set_last_error("input idx out of range");
         return ANE_ERR_INVALID_ARG;
@@ -1164,6 +1172,12 @@ AneStatus ane_request_bind_output(AneRequest* r, int32_t i, AneBuffer* b) {
     if (!r || !b) {
         set_last_error("invalid arg");
         return ANE_ERR_INVALID_ARG;
+    }
+    /* Same in-flight guard as bind_input: the engine writes the bound
+     * output surfaces via DMA until the eval completes. */
+    if (atomic_load(&r->in_flight) != 0) {
+        set_last_error("cannot bind_output while a submission is in flight");
+        return ANE_ERR_BUSY;
     }
     if (i < 0 || i >= r->model->num_outputs) {
         set_last_error("output idx out of range");

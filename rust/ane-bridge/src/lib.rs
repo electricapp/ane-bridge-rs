@@ -2199,6 +2199,23 @@ impl Buffer {
         }
         Ok(Self { raw })
     }
+
+    /// A second [`Buffer`] over this buffer's backing `IOSurface`. Both
+    /// handles retain the surface independently; writes through either are
+    /// visible to the other (and to any request the other is bound to) --
+    /// the safe wrapper for the [`iosurface_ref`](Self::iosurface_ref) +
+    /// [`adopt_iosurface`](Self::adopt_iosurface) pair when the source
+    /// buffer is in hand. `nbytes` is the alias's logical payload size,
+    /// validated against the surface metadata.
+    ///
+    /// # Errors
+    /// Returns [`sys::AneStatus::InvalidArg`] if `nbytes` exceeds the
+    /// surface payload, or the framework error.
+    pub fn alias(&self, nbytes: usize) -> Result<Self> {
+        // SAFETY: `&self` keeps the backing surface live across the call,
+        // and adoption CFRetains it for the new handle.
+        unsafe { Self::adopt_iosurface(self.iosurface_ref(), nbytes) }
+    }
 }
 
 // =============================================================

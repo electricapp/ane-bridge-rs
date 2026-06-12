@@ -79,8 +79,8 @@
 use std::time::Duration;
 
 use ane_bridge::{
-    Buffer, Chain, ChainLink, OpenFileOptions, OpenFileOptionsEx, OpenOptionsEx, PerfStats,
-    SessionHint, SharedEvents, WeightEntry, cache_exists_for_hash, cache_purge_for_hash,
+    Buffer, BufferAccess, Chain, ChainLink, OpenFileOptions, OpenFileOptionsEx, OpenOptionsEx,
+    PerfStats, SessionHint, SharedEvents, WeightEntry, cache_exists_for_hash, cache_purge_for_hash,
     decompress_weights, device_info, num_client_connections, perf_counter_name, sys,
 };
 use proptest::prelude::*;
@@ -210,6 +210,30 @@ fn adopt_iosurface_rejects_null() {
     // SAFETY: explicitly passing null to probe the validation path.
     let r = unsafe { Buffer::adopt_iosurface(core::ptr::null_mut(), 0) };
     assert!(r.is_err());
+}
+
+#[test]
+fn buffer_alias_shares_surface() {
+    let mut a = Buffer::new(4096).expect("allocate");
+    let mut b = a.alias(4096).expect("alias");
+    assert_eq!(a.iosurface_ref(), b.iosurface_ref(), "same backing surface");
+
+    a.with_locked(BufferAccess::Write, |bytes| bytes.fill(0xA5))
+        .expect("write through a");
+    let first = b
+        .with_locked(BufferAccess::ReadWrite, |bytes| bytes[0])
+        .expect("read through b");
+    assert_eq!(
+        first, 0xA5,
+        "write through one handle visible via the other"
+    );
+
+    // The alias retains the surface independently of the source handle.
+    drop(a);
+    let last = b
+        .with_locked(BufferAccess::ReadWrite, |bytes| bytes[4095])
+        .expect("read after source drop");
+    assert_eq!(last, 0xA5);
 }
 
 // ----------------------------------------------------------------
