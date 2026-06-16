@@ -115,6 +115,15 @@ pub enum AneBufferAccess {
     Write = 2,
     /// Read-write access.
     ReadWrite = 3,
+    /// Write, skipping the read-side `IOSurface` cache sync on *lock* only
+    /// (`kIOSurfaceLockAvoidSync`). Avoids pulling in / invalidating the
+    /// surface-sized cache range the CPU is about to overwrite — the
+    /// maintenance that dominates lock cost on large buffers. The matching
+    /// unlock still publishes the writes (the avoid-sync bit is stripped
+    /// there), so a buffer the ANE later reads sees them. Use for fully
+    /// overwritten input/staging buffers; for a partial update the untouched
+    /// bytes are undefined because the read-side sync was skipped.
+    WriteNoSync = 4,
 }
 
 /// One row of the tensor schema. The pointed-to buffers do not need to

@@ -395,6 +395,11 @@ unsafe extern "C" {
     /// Pack a tensor shape (`rank` dims from `dims`) into the buffer.
     pub fn espresso_buffer_pack_tensor_shape(buf: *mut Buffer, rank: usize, dims: *const usize);
     /// Unpack the buffer's tensor shape into `rank` / `dims`.
+    ///
+    /// # Safety
+    /// `dims` must point to storage for at least `espresso_buffer_get_rank(buf)`
+    /// `usize` elements; the call writes one dimension per rank. Under-allocating
+    /// it writes out of bounds.
     pub fn espresso_buffer_unpack_tensor_shape(
         buf: *const Buffer,
         rank: *mut usize,

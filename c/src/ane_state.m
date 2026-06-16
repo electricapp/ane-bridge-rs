@@ -71,7 +71,10 @@ static void state_err_clear(void) {
 
 const char* ane_state_last_error(void) {
     pthread_once(&g_state_err_once, state_err_key_init);
-    return (const char*)pthread_getspecific(g_state_err_key);
+    const char* msg = (const char*)pthread_getspecific(g_state_err_key);
+    /* Never return NULL: callers (and `ane_last_error`) expect a printable C
+     * string, so normalize "no error yet" to "" for a consistent contract. */
+    return msg ? msg : "";
 }
 
 /* ------------------------------------------------------------------ */
@@ -168,6 +171,14 @@ static MLMultiArray* array_from_f32(MLFeatureDescription* fd, const float* src, 
             }
             break;
         case MLMultiArrayDataTypeFloat16: {
+            /* Guard the destination like the fp32 branch above: only the
+             * element count was checked against `arr.count`, not the backing
+             * size the handler reports. A padded / non-unit-stride backing
+             * (where `size < count * 2`) would otherwise write out of bounds. */
+            if ((size_t)size < count * sizeof(__fp16)) {
+                ok = NO;
+                break;
+            }
             __fp16* d = (__fp16*)ptr;
             for (size_t i = 0; i < count; i++) {
                 d[i] = (__fp16)src[i];
@@ -202,6 +213,13 @@ static BOOL array_to_f32(MLMultiArray* arr, float* dst, size_t count) {
             }
             break;
         case MLMultiArrayDataTypeFloat16: {
+            /* Bound the source read like the fp32 branch: `arr.count` was
+             * checked, but a padded / non-unit-stride backing could report a
+             * `size` smaller than `count * 2` and read out of bounds. */
+            if ((size_t)size < count * sizeof(__fp16)) {
+                ok = NO;
+                break;
+            }
             const __fp16* s = (const __fp16*)ptr;
             for (size_t i = 0; i < count; i++) {
                 dst[i] = (float)s[i];
@@ -209,6 +227,10 @@ static BOOL array_to_f32(MLMultiArray* arr, float* dst, size_t count) {
             break;
         }
         case MLMultiArrayDataTypeInt32: {
+            if ((size_t)size < count * sizeof(int32_t)) {
+                ok = NO;
+                break;
+            }
             const int32_t* s = (const int32_t*)ptr;
             for (size_t i = 0; i < count; i++) {
                 dst[i] = (float)s[i];
@@ -454,33 +476,54 @@ static void* ivar_value(id obj, const char* name) {
     return value;
 }
 
+/* Deterministically choose one stream from the engine's pool.
+ *
+ * MLModel._internalEngine (MLE5Engine) -> _streamPool
+ * (MLE5ExecutionStreamPool) -> _allStreams / _pool (NSSet<MLE5ExecutionStream>).
+ * Private ivars; best-effort across OS versions, and nil until the engine has
+ * built a stream (i.e. before the first predict) or for non-MLE5 (non-stateful)
+ * models.
+ *
+ * NSSet has no intrinsic order, so `anyObject` could return different members
+ * on successive calls. Both the stream we hand out for encode/execute and the
+ * stream whose `_operations` back the cached operation must be the SAME object,
+ * or we would encode an op onto a foreign stream. Pick the lowest pointer so
+ * the choice is stable even if the pool ever holds more than one stream. */
+static id pick_pool_stream(const AneStateModel* m) {
+    id engine = (id)ivar_value(m->model, "_internalEngine");
+    id pool = (id)ivar_value(engine, "_streamPool");
+    if (!pool) {
+        return nil;
+    }
+    id streams = (id)ivar_value(pool, "_allStreams");
+    if (![streams isKindOfClass:[NSSet class]] || [(NSSet*)streams count] == 0) {
+        streams = (id)ivar_value(pool, "_pool");
+    }
+    if (![streams isKindOfClass:[NSSet class]]) {
+        return nil;
+    }
+    id chosen = nil;
+    for (id s in (NSSet*)streams) {
+        if (!chosen || (void*)s < (void*)chosen) {
+            chosen = s;
+        }
+    }
+    return chosen;
+}
+
 void* ane_state_e5rt_stream(const AneStateModel* m) {
     if (!m) {
         return NULL;
     }
     @autoreleasepool {
-        /* MLModel._internalEngine (MLE5Engine) -> _streamPool
-         * (MLE5ExecutionStreamPool) -> _allStreams / _pool
-         * (NSSet<MLE5ExecutionStream>) -> any ._streamHandle
-         * (e5rt_execution_stream*). Private ivars; best-effort across OS
-         * versions, and nil until the engine has built a stream (i.e. before
-         * the first predict) or for non-MLE5 (non-stateful) models. */
-        id engine = (id)ivar_value(m->model, "_internalEngine");
-        id pool = (id)ivar_value(engine, "_streamPool");
-        if (!pool) {
-            return NULL;
-        }
-        id streams = (id)ivar_value(pool, "_allStreams");
-        if (![streams isKindOfClass:[NSSet class]] || [(NSSet*)streams count] == 0) {
-            streams = (id)ivar_value(pool, "_pool");
-        }
-        if (![streams isKindOfClass:[NSSet class]]) {
-            return NULL;
-        }
-        id stream = [(NSSet*)streams anyObject];
+        id stream = pick_pool_stream(m);
         if (!stream) {
             return NULL;
         }
+        /* ._streamHandle is the e5rt_execution_stream*. Borrowed; do not
+         * release. The returned handle is an unvalidated opaque pointer read
+         * straight from a private ivar — a future OS that repurposes the ivar
+         * could hand back something else, so treat it as best-effort. */
         return ivar_value(stream, "_streamHandle");
     }
 }
@@ -507,19 +550,9 @@ static id state_stream_operations(const AneStateModel* m) {
     if (!m) {
         return nil;
     }
-    id engine = (id)ivar_value(m->model, "_internalEngine");
-    id pool = (id)ivar_value(engine, "_streamPool");
-    if (!pool) {
-        return nil;
-    }
-    id streams = (id)ivar_value(pool, "_allStreams");
-    if (![streams isKindOfClass:[NSSet class]] || [(NSSet*)streams count] == 0) {
-        streams = (id)ivar_value(pool, "_pool");
-    }
-    if (![streams isKindOfClass:[NSSet class]]) {
-        return nil;
-    }
-    id stream = [(NSSet*)streams anyObject];
+    /* Same stream `ane_state_e5rt_stream` hands out (deterministic pick), so the
+     * cached operation and the stream it is encoded onto always match. */
+    id stream = pick_pool_stream(m);
     if (!stream) {
         return nil;
     }

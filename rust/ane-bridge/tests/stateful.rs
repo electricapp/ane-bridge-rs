@@ -670,7 +670,10 @@ fn e5rt_runner_drives_inference_async() {
         // Bind the I/O slices to locals so the in-flight handle can borrow them.
         let ins = [(in_port.as_str(), &inbuf)];
         let outs = [(out_port.as_str(), &outbuf)];
-        let flight = runner.execute_async(&ins, &outs).expect("submit async");
+        // SAFETY: the handle is waited on (not forgotten) before the buffers or
+        // the shared stream are touched again, and nothing else drives the
+        // model's stream while it is in flight.
+        let flight = unsafe { runner.execute_async(&ins, &outs) }.expect("submit async");
         flight.wait().expect("await async completion");
         let mut out_val = [0.0_f32];
         outbuf.read_f32(&mut out_val).expect("read output");

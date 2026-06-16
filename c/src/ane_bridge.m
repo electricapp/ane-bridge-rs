@@ -114,15 +114,25 @@ static IOSurfaceRef make_surface(size_t bytes) {
         W = 1;
         H = 1;
     } else if (bytes <= 16384) {
+        /* Single row: BytesPerRow alignment is irrelevant with H == 1 (there
+         * are no inter-row gaps), so an exact-width 1xN surface is contiguous. */
         W = bytes;
         H = 1;
     } else {
+        /* Multi-row: pin the row width to 4096 (page-aligned, so IOSurface
+         * never rounds BytesPerRow up and inserts inter-row padding that would
+         * break the ANE's linear read of the first b->nbytes bytes) and pad the
+         * height. The earlier "largest power-of-two divisor" width could
+         * collapse below 64 bytes for sizes with few factors of two (e.g. a
+         * large prime) — risking exactly that row-alignment padding, plus a
+         * pathologically tall surface. Trailing bytes of the last row are
+         * unused; b->nbytes tracks the logical size. */
         W = 4096;
-        while (bytes % W) {
-            W /= 2;
-        }
-        H = bytes / W;
+        H = (bytes + W - 1) / W;
     }
+    /* W*H == bytes for an exact tiling, and >= bytes when the last row is
+     * padded; either way it covers the logical payload. */
+    size_t alloc = W * H;
     return IOSurfaceCreate((__bridge CFDictionaryRef) @{
         (id)kIOSurfaceWidth:
             @(W), // NOLINT(readability-redundant-parentheses): @() boxing requires parens
@@ -131,7 +141,8 @@ static IOSurfaceRef make_surface(size_t bytes) {
         (id)kIOSurfaceBytesPerElement: @1,
         (id)kIOSurfaceBytesPerRow:
             @(W), // NOLINT(readability-redundant-parentheses): @() boxing requires parens
-        (id)kIOSurfaceAllocSize: @(bytes ? bytes : 1),
+        (id)kIOSurfaceAllocSize:
+            @(alloc), // NOLINT(readability-redundant-parentheses): @() boxing requires parens
         (id)kIOSurfacePixelFormat: @0,
     });
 }
@@ -255,7 +266,12 @@ AneStatus ane_buffer_lock(AneBuffer* b, AneBufferAccess access, void** out_ptr) 
         set_last_error("null arg");
         return ANE_ERR_INVALID_ARG;
     }
-    uint32_t flags = (access == ANE_LOCK_READ) ? kIOSurfaceLockReadOnly : 0;
+    uint32_t flags = 0;
+    if (access == ANE_LOCK_READ) {
+        flags = kIOSurfaceLockReadOnly;
+    } else if (access == ANE_LOCK_WRITE_NOSYNC) {
+        flags = kIOSurfaceLockAvoidSync;
+    }
     if (IOSurfaceLock(b->surface, (IOSurfaceLockOptions)flags, NULL) != kIOReturnSuccess) {
         set_last_error("IOSurfaceLock failed");
         return ANE_ERR_INTERNAL;
@@ -270,7 +286,14 @@ AneStatus ane_buffer_unlock(AneBuffer* b) {
     if (!b) {
         return ANE_ERR_INVALID_ARG;
     }
-    uint32_t flags = (uint32_t)b->last_lock_flags;
+    /* Replay the lock flags, but strip kIOSurfaceLockAvoidSync: a write made
+     * under ANE_LOCK_WRITE_NOSYNC skips the read-side cache maintenance on
+     * *lock* (the dominant cost), yet its writes must still be published to
+     * the device on *unlock*. Avoiding sync on unlock too would leave CPU
+     * writes stranded in cache, invisible to an ANE that later DMA-reads the
+     * buffer. The kIOSurfaceLockReadOnly bit (the only other flag we set) is
+     * preserved so a read lock stays non-dirtying. */
+    uint32_t flags = (uint32_t)b->last_lock_flags & ~(uint32_t)kIOSurfaceLockAvoidSync;
     if (IOSurfaceUnlock(b->surface, (IOSurfaceLockOptions)flags, NULL) != kIOReturnSuccess) {
         set_last_error("IOSurfaceUnlock failed");
         return ANE_ERR_INTERNAL;
@@ -2071,6 +2094,7 @@ AneStatus ane_device_info(AneDeviceInfo* out) {
                 const char* u = [(NSString*)v UTF8String];
                 if (u) {
                     strncpy(out->arch_type, u, sizeof(out->arch_type) - 1);
+                    out->arch_type[sizeof(out->arch_type) - 1] = '\0';
                 }
             } else if ([v isKindOfClass:[NSNumber class]]) {
                 snprintf(out->arch_type, sizeof(out->arch_type), "%lld",
@@ -2083,6 +2107,7 @@ AneStatus ane_device_info(AneDeviceInfo* out) {
                 const char* u = [(NSString*)v UTF8String];
                 if (u) {
                     strncpy(out->arch_type, u, sizeof(out->arch_type) - 1);
+                    out->arch_type[sizeof(out->arch_type) - 1] = '\0';
                 }
             }
         }
@@ -2408,6 +2433,12 @@ static id perf_stats_parse(const AnePerfStats* ps) {
     }
     void* base = IOSurfaceGetBaseAddress(ps->surface);
     if (!base) {
+        return nil;
+    }
+    /* The all-zero-header probe below reads two uint64_t (16 bytes). Every
+     * in-tree perf-stats surface is allocated at 4096 bytes, but guard the
+     * read so a smaller surface can never make `hdr[1]` run past the mapping. */
+    if (IOSurfaceGetAllocSize(ps->surface) < 2 * sizeof(uint64_t)) {
         return nil;
     }
     const uint64_t* hdr = (const uint64_t*)base;

@@ -204,9 +204,13 @@ for `predict` — the saved overhead matters most for small, frequent calls such
 as autoregressive KV-cache decode (one drive per token). Benchmark it with
 `cargo run --example e5rt_drive -- <state.mlmodelc>`.
 
-`runner.execute_async(&ins, &outs)?` submits without blocking and returns an
-`E5rtInflight` handle: do other host work, then `.wait()` for completion
-(dropping the handle also waits, so the ANE never writes into freed buffers).
+`unsafe { runner.execute_async(&ins, &outs) }?` submits without blocking and
+returns an `E5rtInflight` handle: do other host work, then `.wait()` for
+completion. Dropping the handle also waits, so the ANE finishes before the
+borrowed buffers can be freed — which is why the call is `unsafe`: that
+guarantee holds only if the handle is allowed to drop (never `mem::forget`-ed)
+and nothing else (`predict`, `execute`, another runner) drives the model's
+shared stream while the submission is in flight.
 
 The loaded graph is also introspectable read-only — `m.e5rt_program_library()`
 (functions, e5 bundle path) and `m.e5rt_operations()` (op name, I/O names) — and

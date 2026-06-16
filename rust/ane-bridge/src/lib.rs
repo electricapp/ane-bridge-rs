@@ -2203,17 +2203,31 @@ impl Buffer {
     /// A second [`Buffer`] over this buffer's backing `IOSurface`. Both
     /// handles retain the surface independently; writes through either are
     /// visible to the other (and to any request the other is bound to) --
-    /// the safe wrapper for the [`iosurface_ref`](Self::iosurface_ref) +
+    /// the wrapper for the [`iosurface_ref`](Self::iosurface_ref) +
     /// [`adopt_iosurface`](Self::adopt_iosurface) pair when the source
     /// buffer is in hand. `nbytes` is the alias's logical payload size,
     /// validated against the surface metadata.
     ///
+    /// # Safety
+    /// The returned handle and `self` map the *same* bytes, but
+    /// [`lock`](Self::lock) hands out a `&mut [u8]` over those bytes while
+    /// borrowing only the one `Buffer` it was called on. The borrow checker
+    /// therefore cannot stop you from locking both handles at once, which
+    /// would create two `&mut` to the same memory — instant undefined
+    /// behavior (and, since [`Buffer`] is `Send`, a data race if the two
+    /// handles are also locked from different threads). The caller must
+    /// ensure the alias and its source are never locked for writing
+    /// simultaneously. (Binding one alias to a request while the CPU reads
+    /// through the other, or vice versa, is the intended zero-copy use and is
+    /// fine — only overlapping Rust `&mut` slices are UB.)
+    ///
     /// # Errors
     /// Returns [`sys::AneStatus::InvalidArg`] if `nbytes` exceeds the
     /// surface payload, or the framework error.
-    pub fn alias(&self, nbytes: usize) -> Result<Self> {
+    pub unsafe fn alias(&self, nbytes: usize) -> Result<Self> {
         // SAFETY: `&self` keeps the backing surface live across the call,
-        // and adoption CFRetains it for the new handle.
+        // and adoption CFRetains it for the new handle. The aliasing
+        // obligation is forwarded to this fn's caller (see `# Safety`).
         unsafe { Self::adopt_iosurface(self.iosurface_ref(), nbytes) }
     }
 }
@@ -4286,14 +4300,36 @@ impl E5rtRunner<'_> {
     /// Submit one inference step **asynchronously**: bind `inputs` / `outputs`
     /// and `submit_async` the encoded work, returning an [`E5rtInflight`]. The
     /// host can do other work while the ANE runs; [`E5rtInflight::wait`] blocks
-    /// for the result (dropping the handle also waits, so the ANE never writes
-    /// into freed buffers). The runner and bound buffers stay borrowed until the
+    /// for the result. The runner and bound buffers stay borrowed until the
     /// handle resolves.
+    ///
+    /// # Safety
+    /// Unlike [`Self::execute`], this returns control to the caller while the
+    /// ANE is still reading/writing the bound buffers, so memory safety rests
+    /// on two caller obligations the type system cannot enforce:
+    ///
+    /// 1. **Do not `mem::forget` the returned [`E5rtInflight`].** Its `Drop`
+    ///    blocks until the ANE completes; skipping `Drop` (via `forget`,
+    ///    `Box::leak`, a leaked `Rc` cycle, …) would end the `'io` borrow while
+    ///    the ANE is mid-DMA, after which dropping a bound [`E5rtBuffer`] frees
+    ///    memory the engine is still touching. Always let the handle drop (or
+    ///    call [`E5rtInflight::wait`]).
+    /// 2. **Do not touch the shared stream while the handle is live.** The
+    ///    bind/encode resets the engine's one stream, which [`Self::execute`],
+    ///    [`StateModel::predict`], and any *other* [`E5rtRunner`] on the same
+    ///    [`StateModel`] also drive. Completing those while this submission is
+    ///    outstanding races the engine. The `&'io mut self` borrow blocks
+    ///    reusing *this* runner, but not a sibling runner or `predict` on the
+    ///    same model — keep them serialized until the handle resolves.
+    ///
+    /// The completion fence further assumes the framework's async-submit block
+    /// fires on ANE completion (not at encode time); that ordering is the basis
+    /// for `Drop`/`wait` being a real barrier and has not been device-verified.
     ///
     /// # Errors
     /// As [`Self::execute`], plus [`sys::AneStatus::Internal`] if the async
     /// submit fails.
-    pub fn execute_async<'io>(
+    pub unsafe fn execute_async<'io>(
         &'io mut self,
         inputs: &'io [(&str, &E5rtBuffer<'_>)],
         outputs: &'io [(&str, &E5rtBuffer<'_>)],
@@ -4336,6 +4372,28 @@ impl E5rtRunner<'_> {
                 status: sys::AneStatus::Unsupported,
                 message: "E5RT stream not available: call predict() at least once first".into(),
             });
+        }
+        // Re-resolve the live operation every call rather than trusting the
+        // pointer cached at runner-build time. The engine can rebuild its
+        // stream/operation (e.g. on a reshape or stream-pool churn), which would
+        // leave `self.op` — and the ports retained from it — dangling. This is
+        // ~3 extra ivar reads on a walk we already do for the stream above, so
+        // it is cheap; if the op did change, the cached ports belonged to the
+        // old operation, so drop them and let `cached_port` re-retain from the
+        // new one (io ports are engine-co-owned and never released, so dropping
+        // the cache entries simply forgets them — consistent with `cached_port`).
+        // SAFETY: `self.model.raw` is a live model handle; returns a borrowed,
+        // engine-owned operation handle or null.
+        let op = unsafe { sys::ane_state_e5rt_operation_at(self.model.raw, 0) };
+        if op.is_null() {
+            return Err(Error {
+                status: sys::AneStatus::Unsupported,
+                message: "E5RT operation no longer available (engine torn down?)".into(),
+            });
+        }
+        if op != self.op {
+            self.ports.clear();
+            self.op = op;
         }
         // SAFETY: `stream` is a live engine-owned execution stream. Reset then
         // prepare must precede binding/encoding (verified ordering).
@@ -4395,8 +4453,11 @@ unsafe extern "C" fn e5rt_async_trampoline(
 /// A handle to an in-flight async E5RT submission ([`E5rtRunner::execute_async`]).
 ///
 /// The runner and bound buffers stay borrowed (`'io`) until this resolves.
-/// [`Self::wait`] blocks for the result; dropping the handle also blocks, so the
-/// ANE never writes into freed buffers.
+/// [`Self::wait`] blocks for the result, and `Drop` blocks too — so as long as
+/// the handle is allowed to drop normally, the ANE finishes before the borrowed
+/// buffers can be freed. That guarantee is exactly why `execute_async` is
+/// `unsafe`: it holds only if `Drop` runs (no `mem::forget`) and the shared
+/// stream is left alone meanwhile. See [`E5rtRunner::execute_async`].
 pub struct E5rtInflight<'io> {
     /// Receives `true` on success (`err` null) when the completion fires.
     rx: std::sync::mpsc::Receiver<bool>,
@@ -4416,6 +4477,39 @@ impl E5rtInflight<'_> {
         self.wait_inner()
     }
 
+    /// Poll for completion, blocking at most `timeout`. Returns `None` if the
+    /// submission is still in flight when the timeout elapses, otherwise
+    /// `Some(result)`.
+    ///
+    /// Unlike [`Self::wait`], this borrows (`&mut self`) instead of consuming,
+    /// so on a timeout the handle — and the `'io` borrow of the buffers it
+    /// guards — stays alive; you can poll again or let it drop (which still
+    /// blocks to completion). This is the safe way to bound how long you wait
+    /// without risking the use-after-free that giving up entirely would cause.
+    ///
+    /// # Errors
+    /// [`sys::AneStatus::Internal`] if the completion reported an error or the
+    /// channel closed before firing.
+    pub fn wait_timeout(&mut self, timeout: core::time::Duration) -> Option<Result<()>> {
+        if self.done {
+            return Some(Ok(()));
+        }
+        match self.rx.recv_timeout(timeout) {
+            Ok(ok) => {
+                self.done = true;
+                Some(Self::interpret(ok))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                self.done = true;
+                Some(Err(Error {
+                    status: sys::AneStatus::Internal,
+                    message: "e5rt async completion channel closed before firing".into(),
+                }))
+            }
+        }
+    }
+
     /// Block once for the completion; idempotent (so `Drop` can also wait).
     fn wait_inner(&mut self) -> Result<()> {
         if self.done {
@@ -4423,15 +4517,23 @@ impl E5rtInflight<'_> {
         }
         self.done = true;
         match self.rx.recv() {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(Error {
-                status: sys::AneStatus::Internal,
-                message: "e5rt async completion reported an error".into(),
-            }),
+            Ok(ok) => Self::interpret(ok),
             Err(_recv) => Err(Error {
                 status: sys::AneStatus::Internal,
                 message: "e5rt async completion channel closed before firing".into(),
             }),
+        }
+    }
+
+    /// Map the completion flag (`true` == `err` null) to a result.
+    fn interpret(ok: bool) -> Result<()> {
+        if ok {
+            Ok(())
+        } else {
+            Err(Error {
+                status: sys::AneStatus::Internal,
+                message: "e5rt async completion reported an error".into(),
+            })
         }
     }
 }

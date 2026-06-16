@@ -157,6 +157,15 @@ typedef enum AneBufferAccess {
     ANE_LOCK_READ = 1,
     ANE_LOCK_WRITE = 2,
     ANE_LOCK_READWRITE = 3,
+    /* Write, skipping the read-side IOSurface cache sync on *lock* only
+     * (kIOSurfaceLockAvoidSync). The lock no longer pulls in / invalidates the
+     * surface-sized cache range the CPU is about to overwrite anyway — the
+     * maintenance that dominates lock cost on large buffers. The matching
+     * unlock still publishes the writes (ane_buffer_unlock strips the
+     * avoid-sync bit), so a buffer the ANE later DMA-reads sees them. Use for
+     * fully-overwritten input/staging buffers; for a partial update the skipped
+     * read-side sync means the untouched bytes are undefined. */
+    ANE_LOCK_WRITE_NOSYNC = 4,
 } AneBufferAccess;
 
 /* Lock for CPU access. *out_ptr receives a pointer valid until unlock. */
@@ -658,7 +667,8 @@ AneStatus ane_state_predict_f32(AneStateModel* m, AneState* s, const char* const
                                 const char* const* out_names, float* const* out_data,
                                 const size_t* out_counts, int32_t n_out);
 
-/* Most recent error on this thread from an ane_state_* call, or NULL. */
+/* Most recent error on this thread from an ane_state_* call. Never NULL:
+ * returns "" when no error has been recorded. */
 const char* ane_state_last_error(void);
 
 /* Escape hatch to the E5RT runtime under MLE5Engine: returns the live

@@ -213,9 +213,53 @@ fn adopt_iosurface_rejects_null() {
 }
 
 #[test]
+fn large_prime_buffer_is_contiguous() {
+    // A size > 16384 whose only odd factor leaves no power-of-two width: the
+    // old "largest power-of-two divisor" scheme collapsed this to a 2-byte-wide
+    // (sub-alignment) multi-row surface, where IOSurface row padding could make
+    // the mapping non-contiguous. The 4096-wide padded shape must round-trip a
+    // byte-exact pattern across the whole logical extent with no gaps.
+    let n = 40_009 * 2; // 80018 bytes: 2 * prime, > 16384
+    let mut buf = Buffer::new(n).expect("allocate");
+    buf.with_locked(BufferAccess::Write, |b| {
+        assert_eq!(b.len(), n, "mapped logical length matches the request");
+        for (i, byte) in b.iter_mut().enumerate() {
+            *byte = (i % 251) as u8;
+        }
+    })
+    .expect("write");
+    let mismatches = buf
+        .with_locked(BufferAccess::Read, |b| {
+            b.iter()
+                .enumerate()
+                .filter(|(i, byte)| **byte != (i % 251) as u8)
+                .count()
+        })
+        .expect("read");
+    assert_eq!(mismatches, 0, "every byte survives a contiguous round-trip");
+}
+
+#[test]
+fn write_nosync_roundtrip() {
+    let mut buf = Buffer::new(8192).expect("allocate");
+    buf.with_locked(BufferAccess::WriteNoSync, |b| b.fill(0x5a))
+        .expect("nosync write");
+    let seen = buf
+        .with_locked(BufferAccess::Read, |b| (b.first().copied(), b.last().copied()))
+        .expect("read");
+    assert_eq!(
+        seen,
+        (Some(0x5a), Some(0x5a)),
+        "nosync write visible to a synced read"
+    );
+}
+
+#[test]
 fn buffer_alias_shares_surface() {
     let mut a = Buffer::new(4096).expect("allocate");
-    let mut b = a.alias(4096).expect("alias");
+    // SAFETY: `a` and `b` are never write-locked at the same time below — each
+    // `with_locked` returns before the next is taken — so no overlapping `&mut`.
+    let mut b = unsafe { a.alias(4096) }.expect("alias");
     assert_eq!(a.iosurface_ref(), b.iosurface_ref(), "same backing surface");
 
     a.with_locked(BufferAccess::Write, |bytes| bytes.fill(0xA5))
