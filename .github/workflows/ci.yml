@@ -19,17 +19,25 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  build-and-test:
+  # ── Deterministic macOS checks (no ANE hardware required) ──
+  #
+  # Everything here either lints or COMPILES; nothing runs CoreML/ANE
+  # inference, so it works on a hosted runner and is expected to stay green.
+  # The ANE-inference steps live in the separate, gated `ane-runtime` job
+  # below — GitHub-hosted macOS runners are virtualized and do not expose
+  # the Apple Neural Engine (CoreML reports "Host too old, ANE hardware not
+  # available" the moment a model is compiled for the ANE).
+  macos-checks:
     name: build + test (macOS Apple Silicon)
-    # macos-14 and later are Apple Silicon (arm64) with ANE available.
-    # The C side (c/src/ane_state.m) builds against CoreML APIs that require
-    # the macOS 26 SDK: the stateful-prediction surface (MLState, -newState,
+    # macos-14 and later are Apple Silicon (arm64). The C side
+    # (c/src/ane_state.m) builds against CoreML APIs that require the macOS 26
+    # SDK: the stateful-prediction surface (MLState, -newState,
     # -predictionFromFeatures:usingState:error:) needs macOS 15, and the
     # MLMultiArrayDataTypeInt8 enumerator is API_AVAILABLE(macos(26.0)). Older
     # SDKs (macos-14 = Xcode 15, macos-15 = Xcode 16) lack these, so the build
     # fails to compile. macos-26 (Xcode 26) ships the SDK the sources need.
     runs-on: macos-26
-    # Heavy lane: C/Obj-C lint + Rust build + heap guards + loom + TSAN + leaks.
+    # C/Obj-C lint + C build + Rust fmt/clippy/doc/build. No inference.
     timeout-minutes: 40
     permissions:
       contents: read
@@ -112,11 +120,9 @@ jobs:
       - name: Generate identity model fixture
         run: python3 tools/make_identity_model.py build/identity
 
-      - name: Run C identity example
-        run: ./build/bin/identity build/identity/model.mil build/identity/weights.bin
-
-      - name: Run C zero-copy example
-        run: ./build/bin/zero_copy build/identity/model.mil build/identity/weights.bin
+      # NOTE: actually RUNNING the C examples (./build/bin/identity, zero_copy)
+      # compiles a CoreML model for the ANE and so lives in the gated
+      # `ane-runtime` job, not here — a hosted runner has no ANE.
 
       # ----- Rust formatting -----
       - name: cargo fmt
@@ -134,6 +140,86 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --workspace
+
+      # ----- Rust build (compile only; running examples/tests is ANE work) -----
+      - name: cargo build (release)
+        working-directory: rust
+        run: cargo build --workspace --release --all-targets
+
+  # ── ANE-runtime lane (requires a real Apple Neural Engine) ──
+  #
+  # Every step here executes CoreML inference on the ANE: running the C and
+  # Rust examples, the integration tests, the heap-guard / loom / TSAN passes,
+  # and the `leaks` run all compile a model for the ANE and run it. GitHub's
+  # HOSTED macOS runners are virtualized and do NOT expose the Apple Neural
+  # Engine, so CoreML fails immediately with:
+  #
+  #     compileModel:options:qos:error:: Host too old, ANE hardware not available
+  #
+  # This job therefore targets a SELF-HOSTED Apple-Silicon-with-ANE runner and
+  # is gated so it only fires on an explicit opt-in — a manual `workflow_dispatch`
+  # run, or a commit message containing the `[ane]` marker. On ordinary PRs and
+  # pushes it is skipped (it does not run and does not go red), so it is a ready
+  # scaffold for when such a runner is wired up. The steps are moved verbatim
+  # from the old single lane — same commands, env, suppressions, and invocations.
+  ane-runtime:
+    name: ANE runtime (self-hosted Apple Silicon)
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[ane]')
+    runs-on: [self-hosted, macos, ane]
+    # Heavy lane: run examples + heap guards + loom + TSAN + leaks on real ANE.
+    timeout-minutes: 40
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # ----- Python (for the identity-model generator script) -----
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      # tools/make_identity_model.py drives its CLI with typer + rich; the
+      # bare setup-python toolchain has neither, so install them explicitly.
+      # Pinned for a reproducible fixture-generation step.
+      - name: Install Python deps for fixture generator
+        run: python3 -m pip install "typer==0.23.2" "rich==15.0.0"
+
+      # ----- Rust toolchain -----
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      # ----- Cargo cache -----
+      - uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/**/Cargo.lock', 'rust/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Rebuild the C dylib + examples and regenerate the model fixture: this
+      # job runs on a separate runner from `macos-checks`, so it does not share
+      # that job's build/ output.
+      - name: Build dylib + C examples
+        run: |
+          make
+          make examples
+
+      - name: Generate identity model fixture
+        run: python3 tools/make_identity_model.py build/identity
+
+      - name: Run C identity example
+        run: ./build/bin/identity build/identity/model.mil build/identity/weights.bin
+
+      - name: Run C zero-copy example
+        run: ./build/bin/zero_copy build/identity/model.mil build/identity/weights.bin
 
       # ----- Rust build + run examples + integration tests -----
       - name: cargo build (release)

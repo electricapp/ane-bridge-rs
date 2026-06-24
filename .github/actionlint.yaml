@@ -1,0 +1,9 @@
+# actionlint configuration.
+#
+# `ane` is a custom self-hosted runner label used by the gated `ane-runtime`
+# job in ci.yml — it targets an Apple-Silicon-with-ANE machine (GitHub-hosted
+# macOS runners are virtualized and do not expose the Apple Neural Engine).
+# Declared here so actionlint does not flag it as an unknown runner label.
+self-hosted-runner:
+  labels:
+    - ane
