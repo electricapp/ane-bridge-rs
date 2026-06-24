@@ -1,0 +1,30 @@
+version: 2
+updates:
+  # Rust dependencies (Cargo.toml / Cargo.lock). The workspace lives under
+  # rust/, so the manifest directory is /rust, not the repo root.
+  - package-ecosystem: cargo
+    directory: "/rust"
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 99
+    commit-message:
+      prefix: "deps(rust)"
+    labels: ["dependencies", "rust"]
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: ["patch", "minor", "major"]
+
+  # GitHub Actions workflows — Dependabot bumps both the SHA pin and the
+  # trailing version comment.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 99
+    commit-message:
+      prefix: "deps(actions)"
+    labels: ["dependencies", "actions"]
+    groups:
+      actions:
+        patterns: ["*"]
