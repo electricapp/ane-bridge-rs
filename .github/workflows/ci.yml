@@ -44,6 +44,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      # tools/make_identity_model.py drives its CLI with typer + rich; the
+      # bare setup-python toolchain has neither, so install them explicitly.
+      # Pinned for a reproducible fixture-generation step.
+      - name: Install Python deps for fixture generator
+        run: python3 -m pip install "typer==0.23.2" "rich==15.0.0"
+
       # ----- Rust toolchain -----
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
