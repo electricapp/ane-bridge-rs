@@ -1,7 +1,7 @@
 {
   "branch_protection": {
     "master": {
-      "required_status_checks_contexts": ["build + test (macOS Apple Silicon)", "deny", "audit", "actionlint"],
+      "required_status_checks_contexts": ["build + test (macOS Apple Silicon)", "deny", "audit", "Unused Dependencies", "actionlint"],
       "required_status_checks_strict": true,
       "enforce_admins": false,
       "required_linear_history": true,

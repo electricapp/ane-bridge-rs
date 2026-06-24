@@ -257,6 +257,26 @@ jobs:
       - name: Audit committed lockfile
         run: cargo audit
 
+  # ── Unused dependency check (cargo-machete) ──
+  # Flags deps declared in rust/Cargo.toml that nothing references.
+  unused-deps:
+    name: Unused Dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2.81.11
+        with:
+          tool: cargo-machete
+      - name: Check for unused dependencies
+        working-directory: rust
+        run: cargo machete
+
   # ── Lint the workflow files themselves (YAML + embedded shell) ──
   # shellcheck ships on the runner, so actionlint also checks the inline
   # bash. Catches dead runner labels, quoting bugs, and bad expressions
