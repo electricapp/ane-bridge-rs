@@ -65,12 +65,24 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # ----- C/Obj-C formatting + static analysis -----
-      - name: Install clang-tidy (LLVM)
-        run: brew install llvm
+      #
+      # clang-format is pinned to a specific LLVM major (llvm@19). Apple's
+      # `xcrun clang-format` version is tied to the runner's Xcode and
+      # drifts between runner images, so its formatting output is
+      # non-deterministic across CI runs — the committed C can be a 0-diff
+      # on one image and fail `--Werror` on the next. Pinning Homebrew LLVM
+      # makes the format check reproducible and matches the exact version
+      # used to reformat the sources. `brew install llvm` (unpinned) stays
+      # for clang-tidy, whose analyzer output is far less sensitive to the
+      # source layout than to the macOS SDK on the runner.
+      - name: Install LLVM (clang-format pinned + clang-tidy)
+        run: |
+          brew install llvm@19
+          brew install llvm
 
       - name: clang-format (C/Obj-C, --Werror)
         run: |
-          xcrun clang-format --dry-run --Werror \
+          "$(brew --prefix llvm@19)/bin/clang-format" --dry-run --Werror \
             c/src/*.m c/src/*.h c/include/*.h c/examples/*.c c/examples/*.m
 
       - name: clang-tidy (C/Obj-C library, max checks as errors)
