@@ -6,6 +6,14 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Deny-all by default; each job re-grants only what it needs.
+permissions: {}
+
+# A new push to a PR/branch cancels the prior in-progress run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -15,19 +23,25 @@ jobs:
     name: build + test (macOS Apple Silicon)
     # macos-14 and later are Apple Silicon (arm64) with ANE available.
     runs-on: macos-14
-    timeout-minutes: 20
+    # Heavy lane: C/Obj-C lint + Rust build + heap guards + loom + TSAN + leaks.
+    timeout-minutes: 40
+    permissions:
+      contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       # ----- Python (for the identity-model generator script) -----
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.11"
 
       # ----- Rust toolchain -----
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
+          toolchain: stable
           components: clippy, rustfmt
 
       - name: Show toolchain
@@ -40,7 +54,7 @@ jobs:
           xcrun clang --version
 
       # ----- Cargo cache -----
-      - uses: actions/cache@v4
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -169,7 +183,10 @@ jobs:
           ANE_BRIDGE_TSAN: "1"
           TSAN_OPTIONS: "halt_on_error=1 suppressions=../c/tsan.supp second_deadlock_stack=1"
         run: |
-          export DYLD_LIBRARY_PATH=$(clang --print-runtime-dir):$DYLD_LIBRARY_PATH
+          # Declare + assign separately so the export doesn't mask clang's
+          # exit status (shellcheck SC2155).
+          DYLD_LIBRARY_PATH="$(clang --print-runtime-dir):$DYLD_LIBRARY_PATH"
+          export DYLD_LIBRARY_PATH
           cargo clean -p ane-bridge-sys
           cargo test --release --workspace --test race --test stress
 
@@ -197,3 +214,68 @@ jobs:
           # `leaks --atExit --` waits for the process to finish then
           # scans. Exits non-zero if any leaks are found.
           leaks --atExit --quiet -- "$STRESS_BIN" --test-threads=1
+
+  # ── Supply chain: license / bans / sources policy (deny.toml) ──
+  # Runs on Linux against the committed lockfile in `rust/`. Cheap, no
+  # macOS minutes — the FFI is irrelevant to the dependency graph.
+  deny:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          # Workspace manifest + config both live under rust/; the action
+          # auto-discovers rust/deny.toml next to the manifest.
+          manifest-path: rust/Cargo.toml
+          command: check
+
+  # ── Supply chain: RustSec advisory audit ──
+  # Plain run step (not rustsec/audit-check): the action can't load a
+  # lockfile from a subdirectory, and the workspace lives under rust/.
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit committed lockfile
+        run: cargo audit
+
+  # ── Lint the workflow files themselves (YAML + embedded shell) ──
+  # shellcheck ships on the runner, so actionlint also checks the inline
+  # bash. Catches dead runner labels, quoting bugs, and bad expressions
+  # before they break a tag release (where failures are most expensive).
+  actionlint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Run actionlint (SHA-pinned download + checksum)
+        run: |
+          VER="1.7.12"
+          SHA="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${VER}/actionlint_${VER}_linux_amd64.tar.gz" -o actionlint.tgz
+          echo "${SHA}  actionlint.tgz" | sha256sum -c -
+          tar -xzf actionlint.tgz actionlint
+          ./actionlint
