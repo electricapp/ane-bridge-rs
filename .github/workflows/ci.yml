@@ -22,7 +22,13 @@ jobs:
   build-and-test:
     name: build + test (macOS Apple Silicon)
     # macos-14 and later are Apple Silicon (arm64) with ANE available.
-    runs-on: macos-14
+    # The C side (c/src/ane_state.m) builds against CoreML APIs that require
+    # the macOS 26 SDK: the stateful-prediction surface (MLState, -newState,
+    # -predictionFromFeatures:usingState:error:) needs macOS 15, and the
+    # MLMultiArrayDataTypeInt8 enumerator is API_AVAILABLE(macos(26.0)). Older
+    # SDKs (macos-14 = Xcode 15, macos-15 = Xcode 16) lack these, so the build
+    # fails to compile. macos-26 (Xcode 26) ships the SDK the sources need.
+    runs-on: macos-26
     # Heavy lane: C/Obj-C lint + Rust build + heap guards + loom + TSAN + leaks.
     timeout-minutes: 40
     permissions:
