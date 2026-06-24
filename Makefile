@@ -23,6 +23,13 @@ CC            ?= xcrun clang
 # fatal. The `-Wno-*` list opts out ONLY of categories that fight idioms this
 # codebase deliberately uses; each one is load-bearing — do not drop a line
 # without checking what it re-enables:
+#   unknown-warning-option       tolerate -Wno-* flags that only newer clang
+#                                knows (e.g. cast-function-type-strict): the
+#                                macos-14 CI runner ships an older Apple clang
+#                                that would otherwise reject the flag under
+#                                -Werror. Must precede the version-specific
+#                                -Wno-* options below so they are skipped, not
+#                                errored, on a clang that doesn't recognize them.
 #   declaration-after-statement  C99 mixed declarations are intentional
 #   objc-messaging-id            the private _ANE* framework is dispatched via `id`
 #   cast-function-type-strict    required typed-cast idiom for objc_msgSend
@@ -33,6 +40,7 @@ CC            ?= xcrun clang
 #   unused-parameter             callback / function-pointer signatures carry unused args
 #   double-promotion             benign float->double in numeric / printf example code
 WARN          := -Weverything -Werror \
+                 -Wno-unknown-warning-option \
                  -Wno-declaration-after-statement \
                  -Wno-objc-messaging-id \
                  -Wno-cast-function-type-strict \
