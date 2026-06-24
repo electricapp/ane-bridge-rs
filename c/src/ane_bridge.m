@@ -293,7 +293,7 @@ AneStatus ane_buffer_unlock(AneBuffer* b) {
      * writes stranded in cache, invisible to an ANE that later DMA-reads the
      * buffer. The kIOSurfaceLockReadOnly bit (the only other flag we set) is
      * preserved so a read lock stays non-dirtying. */
-    uint32_t flags = (uint32_t)b->last_lock_flags & ~(uint32_t)kIOSurfaceLockAvoidSync;
+    uint32_t flags = (uint32_t)b->last_lock_flags & ~kIOSurfaceLockAvoidSync;
     if (IOSurfaceUnlock(b->surface, (IOSurfaceLockOptions)flags, NULL) != kIOReturnSuccess) {
         set_last_error("IOSurfaceUnlock failed");
         return ANE_ERR_INTERNAL;
