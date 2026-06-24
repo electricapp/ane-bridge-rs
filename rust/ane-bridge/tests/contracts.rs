@@ -245,7 +245,9 @@ fn write_nosync_roundtrip() {
     buf.with_locked(BufferAccess::WriteNoSync, |b| b.fill(0x5a))
         .expect("nosync write");
     let seen = buf
-        .with_locked(BufferAccess::Read, |b| (b.first().copied(), b.last().copied()))
+        .with_locked(BufferAccess::Read, |b| {
+            (b.first().copied(), b.last().copied())
+        })
         .expect("read");
     assert_eq!(
         seen,
