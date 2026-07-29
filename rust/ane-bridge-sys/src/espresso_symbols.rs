@@ -428,6 +428,10 @@ pub const E5RT: &[&CStr] = &[
 ];
 
 #[cfg(test)]
+#[expect(
+    clippy::inline_modules,
+    reason = "`#[cfg(test)] mod tests` inline is universal Rust idiom, and these tests only assert against the symbol lists directly above them"
+)]
 mod tests {
     use super::{E5RT, ESPRESSO};
     use core::ffi::{c_char, c_int, c_void};

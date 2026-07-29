@@ -75,3 +75,4 @@ error_impl_error              = "allow"     # `Error` IS the idiomatic public na
 missing_trait_methods         = "allow"     # `Error`'s `source`/`description`/`cause`/`provide`/`type_id` defaults are deliberate
 non_ascii_literal             = "allow"     # doctest output strings may contain unicode (e.g. ANE telemetry labels)
 default_numeric_fallback      = "allow"     # `0` / `1` literals in math have unambiguous inferred types; verbose suffixes hurt readability
+inline_trait_bounds           = "allow"     # `<P: AsRef<Path>>` is universal idiom; a `where` clause per one-bound generic is pure noise

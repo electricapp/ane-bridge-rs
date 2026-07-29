@@ -1424,25 +1424,7 @@ unsafe extern "C" {
     pub fn _ane_internal_fuzz_mixed_validity_two_entries() -> AneStatus;
 }
 
-/// Mutation bitmask for [`AneFuzzAttrsCase`]. Mirrors `AneFuzzAttrsMutation`.
-pub mod fuzz_attrs {
-    /// Replace `NetworkStatusList` with a non-array.
-    pub const NSL_NOT_ARRAY: u32 = 1 << 0;
-    /// Omit `NetworkStatusList` entirely.
-    pub const NSL_MISSING: u32 = 1 << 1;
-    /// `NetworkStatusList` is empty.
-    pub const NSL_EMPTY: u32 = 1 << 2;
-    /// `NetworkStatusList[0]` is not a dictionary.
-    pub const PROC_NOT_DICT: u32 = 1 << 3;
-    /// Omit `LiveInputList`.
-    pub const LIVEIN_MISSING: u32 = 1 << 4;
-    /// Omit `LiveOutputList`.
-    pub const LIVEOUT_MISSING: u32 = 1 << 5;
-    /// `LiveInputList` is not an array.
-    pub const LIVEIN_NOT_ARRAY: u32 = 1 << 6;
-    /// `LiveOutputList` is not an array.
-    pub const LIVEOUT_NOT_ARRAY: u32 = 1 << 7;
-}
+pub mod fuzz_attrs;
 
 /// Adversarial input for [`_ane_internal_fuzz_parse_attrs`]. Layout
 /// must match the C struct.
@@ -1476,25 +1458,7 @@ const _: () = {
     );
 };
 
-/// Field-presence bitmask used by [`AneFuzzCase`].
-pub mod fuzz_field {
-    /// `Name` key present.
-    pub const NAME: u32 = 1 << 0;
-    /// `Type` key present.
-    pub const TYPE: u32 = 1 << 1;
-    /// `Batches` key present.
-    pub const BATCHES: u32 = 1 << 2;
-    /// `Channels` key present.
-    pub const CHANNELS: u32 = 1 << 3;
-    /// `Depth` key present.
-    pub const DEPTH: u32 = 1 << 4;
-    /// `Height` key present.
-    pub const HEIGHT: u32 = 1 << 5;
-    /// `Width` key present.
-    pub const WIDTH: u32 = 1 << 6;
-    /// All dimension + name/type keys present.
-    pub const ALL: u32 = 0x7F;
-}
+pub mod fuzz_field;
 
 /// Adversarial input to [`_ane_internal_fuzz_parse_one`].
 ///
