@@ -59,7 +59,7 @@ jobs:
         run: python3 -m pip install "typer==0.23.2" "rich==15.0.0"
 
       # ----- Rust toolchain -----
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           components: clippy, rustfmt
@@ -188,7 +188,7 @@ jobs:
         run: python3 -m pip install "typer==0.23.2" "rich==15.0.0"
 
       # ----- Rust toolchain -----
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           components: clippy, rustfmt
@@ -380,7 +380,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install cargo-machete
-        uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
+        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2.85.13
         with:
           tool: cargo-machete
       - name: Check for unused dependencies
