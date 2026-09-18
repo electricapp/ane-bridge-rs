@@ -1,0 +1,23 @@
+[package]
+name          = "ane-bridge-mil"
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+authors       = { workspace = true }
+readme        = "../../README.md"
+documentation = "https://docs.rs/ane-bridge-mil"
+keywords      = ["mil", "coreml", "ane", "neural-engine", "compiler"]
+categories    = ["hardware-support", "development-tools::ffi", "api-bindings"]
+description   = "Write MIL programs for the Apple Neural Engine in Rust, with the hardware's constraints enforced at the builder."
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+half = "2.4"
+
+[lints]
+workspace = true

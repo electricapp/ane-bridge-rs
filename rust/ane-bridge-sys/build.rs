@@ -20,6 +20,19 @@ fn main() -> IoResult<()> {
     let src_dir = root.join("c/src");
 
     let mut build = cc::Build::new();
+    // Under `nix develop` the shell's clang is pinned to an older apple-sdk,
+    // where MLState and MLMultiArrayDataTypeInt8 do not exist. Use Apple's
+    // clang for the Obj-C so it sees the system SDK. Scoped here rather than
+    // set shell-wide: a global CC changes how other crates' assembly is
+    // emitted. Outside nix, cc-rs already picks /usr/bin/clang.
+    if std::env::var_os("NIX_CFLAGS_COMPILE").is_some()
+        || std::env::var_os("IN_NIX_SHELL").is_some()
+    {
+        println!("cargo:rerun-if-env-changed=NIX_CFLAGS_COMPILE");
+        if Path::new("/usr/bin/clang").exists() {
+            build.compiler("/usr/bin/clang");
+        }
+    }
     build
         .file(src_dir.join("ane_private.m"))
         .file(src_dir.join("ane_bridge.m"))

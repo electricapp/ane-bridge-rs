@@ -17,7 +17,7 @@ bridge from MIL text + weights to ANE, built on
 when it offloads to ANE.
 
 - **Safe Rust bindings** + **C library** (`libane_bridge.dylib`) with a stable header (`ane_bridge.h`).
-- **Rust workspace**: `ane-bridge-sys` (raw FFI) + `ane-bridge` (safe wrapper).
+- **Rust workspace**: `ane-bridge-sys` (raw FFI) + `ane-bridge` (safe wrapper) + `ane-bridge-mil` (write MIL in Rust).
 - **Schema derived from the framework** (via `modelAttributes`), not declared by the caller.
 - **Async**: `submit` + `wait` / poll / callback / `Future`; up to 127 in-flight requests per model.
 - **Zero-copy path**: `IOSurface` bind with ownership transfer for hot loops; byte-ptr memcpy path for convenience.
@@ -300,11 +300,38 @@ sources via the `cc` crate.
 ## Caveats
 
 - Uses Apple's **private** `AppleNeuralEngine.framework`.
-- MIL text is the input contract. No converter shipped — use `coremltools` or write MIL directly.
+- MIL text is the input contract. No converter shipped — use `coremltools`, `ane-bridge-mil`, or write MIL directly.
+- The framework accepts less MIL than MIL describes, and one violation returns wrong data silently. `ane-bridge-mil` refuses to emit those graphs; writing the text by hand means reading [docs/MIL-CONSTRAINTS.md](docs/MIL-CONSTRAINTS.md) first.
 - Weight references resolve against the `NSDictionary` passed at open — one entry per named blob.
+
+## Writing MIL
+
+`ane-bridge-mil` builds a MIL program and its weight blob from Rust, one
+statement at a time, with each value carrying its static shape:
+
+```rust
+use ane_bridge_mil::{ConvOpts, Dtype, Graph};
+
+let mut g = Graph::new("fir");
+let x = g.input("x", Dtype::Fp16, &[1, 1, 1, 4096]);
+let taps = g.weight_fp16(&[1, 1, 1, 8], &[0.125; 8]);
+let y = g.conv(&x, &taps, None, ConvOpts::decimating_fir(8, 1, 1));
+let (mil, weights) = g.save("build/fir", &[&y])?;
+```
+
+The shapes are what make the builder able to reject a graph the hardware
+mishandles: a boundary width off the 32 grid, a kernel wider than 15, fp32
+arithmetic, a strided dense convolution, an op no output can reach. The first
+of those is otherwise silent — it runs and returns mis-strided rows.
+
+Because ops on this hardware do not fuse, `Graph::traffic()` counts the bytes a
+program moves straight from the program text, which prices two formulations
+against each other without building either.
 
 ## Further reading
 
+- [docs/MIL-CONSTRAINTS.md](docs/MIL-CONSTRAINTS.md) — what MIL the framework actually accepts, the cost model, and how to make a graph faster once it runs.
+- [`ane-bridge-mil`](rust/ane-bridge-mil) — those constraints as code: a MIL builder that will not emit a graph that breaks them.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — dispatch path diagrams, model/buffer/request lifecycle, error reporting, Rust safety invariants.
 - [docs/TESTING.md](docs/TESTING.md) — test suites, CI checks, system corpus.
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — development setup, lint policy.
