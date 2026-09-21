@@ -1645,15 +1645,25 @@ AneStatus ane_request_run(AneRequest* r, AneQoS qos) {
  * stable API; declared in ane_bridge.h purely so Rust tests can
  * link against it. See AneFuzzCase for the input model.
  * ============================================================ */
+
+/* C gives every enumeration constant the type `int`, whatever its
+ * initializer was written as, so `mask & ANE_FUZZ_*` is a signed
+ * bitwise operation no matter how the enumerator is spelled. Funnel
+ * the bit tests through one unsigned helper rather than repeating a
+ * cast at each of them. */
+static inline bool fuzz_bit(uint32_t mask, uint32_t bit) {
+    return (mask & bit) != 0U;
+}
+
 AneStatus _ane_internal_fuzz_parse_one(const AneFuzzCase* fc) {
     if (!fc) {
         return ANE_ERR_INVALID_ARG;
     }
     @autoreleasepool {
         NSMutableDictionary* entry = [NSMutableDictionary dictionary];
-        if (fc->present_mask & ANE_FUZZ_FIELD_NAME) {
+        if (fuzz_bit(fc->present_mask, ANE_FUZZ_FIELD_NAME)) {
             id name_obj = nil;
-            if (fc->flags & ANE_FUZZ_FLAG_NAME_AS_NUMBER) {
+            if (fuzz_bit(fc->flags, ANE_FUZZ_FLAG_NAME_AS_NUMBER)) {
                 name_obj = @42;
             } else if (fc->name) {
                 name_obj = [NSString stringWithUTF8String:fc->name];
@@ -1666,9 +1676,9 @@ AneStatus _ane_internal_fuzz_parse_one(const AneFuzzCase* fc) {
             entry[@"Name"] = name_obj;
             entry[@"Symbol"] = name_obj;
         }
-        if (fc->present_mask & ANE_FUZZ_FIELD_TYPE) {
+        if (fuzz_bit(fc->present_mask, ANE_FUZZ_FIELD_TYPE)) {
             id t = nil;
-            if (fc->flags & ANE_FUZZ_FLAG_TYPE_AS_NUMBER) {
+            if (fuzz_bit(fc->flags, ANE_FUZZ_FLAG_TYPE_AS_NUMBER)) {
                 t = @42;
             } else if (fc->type_string) {
                 t = [NSString stringWithUTF8String:fc->type_string];
@@ -1680,13 +1690,13 @@ AneStatus _ane_internal_fuzz_parse_one(const AneFuzzCase* fc) {
             }
             entry[@"Type"] = t;
         }
-#define PUT_DIM(MASK, KEY, FIELD, FLAG)   \
-    if (fc->present_mask & (MASK)) {      \
-        if (fc->flags & (FLAG)) {         \
-            entry[KEY] = @"not_a_number"; \
-        } else {                          \
-            entry[KEY] = @(fc->FIELD);    \
-        }                                 \
+#define PUT_DIM(MASK, KEY, FIELD, FLAG)       \
+    if (fuzz_bit(fc->present_mask, (MASK))) { \
+        if (fuzz_bit(fc->flags, (FLAG))) {    \
+            entry[KEY] = @"not_a_number";     \
+        } else {                              \
+            entry[KEY] = @(fc->FIELD);        \
+        }                                     \
     }
         PUT_DIM(ANE_FUZZ_FIELD_BATCHES, @"Batches", batches, ANE_FUZZ_FLAG_BATCHES_AS_STRING)
         PUT_DIM(ANE_FUZZ_FIELD_CHANNELS, @"Channels", channels, ANE_FUZZ_FLAG_CHANNELS_AS_STRING)
@@ -1748,34 +1758,34 @@ AneStatus _ane_internal_fuzz_parse_attrs(const AneFuzzAttrsCase* fc) {
             @"Name": @"main",
         } mutableCopy] autorelease];
 
-        if (fc->mutations & ANE_FUZZ_ATTRS_LIVEIN_MISSING) {
+        if (fuzz_bit(fc->mutations, ANE_FUZZ_ATTRS_LIVEIN_MISSING)) {
             [proc removeObjectForKey:@"LiveInputList"];
         }
-        if (fc->mutations & ANE_FUZZ_ATTRS_LIVEOUT_MISSING) {
+        if (fuzz_bit(fc->mutations, ANE_FUZZ_ATTRS_LIVEOUT_MISSING)) {
             [proc removeObjectForKey:@"LiveOutputList"];
         }
-        if (fc->mutations & ANE_FUZZ_ATTRS_LIVEIN_NOT_ARRAY) {
+        if (fuzz_bit(fc->mutations, ANE_FUZZ_ATTRS_LIVEIN_NOT_ARRAY)) {
             proc[@"LiveInputList"] = @"not_an_array";
         }
-        if (fc->mutations & ANE_FUZZ_ATTRS_LIVEOUT_NOT_ARRAY) {
+        if (fuzz_bit(fc->mutations, ANE_FUZZ_ATTRS_LIVEOUT_NOT_ARRAY)) {
             proc[@"LiveOutputList"] = @42;
         }
 
         /* Wrap into a NetworkStatusList. */
         id nsl = nil;
-        if (fc->mutations & ANE_FUZZ_ATTRS_NSL_EMPTY) {
+        if (fuzz_bit(fc->mutations, ANE_FUZZ_ATTRS_NSL_EMPTY)) {
             nsl = @[];
-        } else if (fc->mutations & ANE_FUZZ_ATTRS_PROC_NOT_DICT) {
+        } else if (fuzz_bit(fc->mutations, ANE_FUZZ_ATTRS_PROC_NOT_DICT)) {
             nsl = @[@"not_a_dict"];
         } else {
             nsl = @[proc];
         }
-        if (fc->mutations & ANE_FUZZ_ATTRS_NSL_NOT_ARRAY) {
+        if (fuzz_bit(fc->mutations, ANE_FUZZ_ATTRS_NSL_NOT_ARRAY)) {
             nsl = @"not_an_array";
         }
 
         NSMutableDictionary* attrs = [NSMutableDictionary dictionary];
-        if (!(fc->mutations & ANE_FUZZ_ATTRS_NSL_MISSING)) {
+        if (!fuzz_bit(fc->mutations, ANE_FUZZ_ATTRS_NSL_MISSING)) {
             attrs[@"NetworkStatusList"] = nsl;
         }
 
@@ -1926,7 +1936,7 @@ AneStatus _ane_internal_fuzz_name_with_embedded_nul(void) {
 AneStatus _ane_internal_fuzz_huge_name(size_t length) {
     @autoreleasepool {
         /* Cap absurd sizes — proptest could send length=usize::MAX. */
-        if (length > (1U << 24)) {
+        if (length > (1U << 24U)) {
             return ANE_ERR_INVALID_ARG; /* 16 MB cap */
         }
         char* buf = (char*)malloc(length + 1);

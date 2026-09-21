@@ -719,13 +719,13 @@ int ane_state_e5rt_submit_async(void* stream, AneE5rtCompletion cb, void* ctx);
 /* Bitmask of which keys are present in the synthesized LiveInputList
  * entry that `_ane_internal_fuzz_parse_one` builds. */
 typedef enum {
-    ANE_FUZZ_FIELD_NAME = 1U << 0,
-    ANE_FUZZ_FIELD_TYPE = 1U << 1,
-    ANE_FUZZ_FIELD_BATCHES = 1U << 2,
-    ANE_FUZZ_FIELD_CHANNELS = 1U << 3,
-    ANE_FUZZ_FIELD_DEPTH = 1U << 4,
-    ANE_FUZZ_FIELD_HEIGHT = 1U << 5,
-    ANE_FUZZ_FIELD_WIDTH = 1U << 6,
+    ANE_FUZZ_FIELD_NAME = 1U << 0U,
+    ANE_FUZZ_FIELD_TYPE = 1U << 1U,
+    ANE_FUZZ_FIELD_BATCHES = 1U << 2U,
+    ANE_FUZZ_FIELD_CHANNELS = 1U << 3U,
+    ANE_FUZZ_FIELD_DEPTH = 1U << 4U,
+    ANE_FUZZ_FIELD_HEIGHT = 1U << 5U,
+    ANE_FUZZ_FIELD_WIDTH = 1U << 6U,
     ANE_FUZZ_FIELD_ALL = 0x7F,
 } AneFuzzFieldMask;
 
@@ -733,13 +733,13 @@ typedef enum {
  * Rust mirror stays in lockstep without relying on implementation-
  * defined C bitfield packing. */
 typedef enum {
-    ANE_FUZZ_FLAG_BATCHES_AS_STRING = 1U << 0,
-    ANE_FUZZ_FLAG_CHANNELS_AS_STRING = 1U << 1,
-    ANE_FUZZ_FLAG_DEPTH_AS_STRING = 1U << 2,
-    ANE_FUZZ_FLAG_HEIGHT_AS_STRING = 1U << 3,
-    ANE_FUZZ_FLAG_WIDTH_AS_STRING = 1U << 4,
-    ANE_FUZZ_FLAG_NAME_AS_NUMBER = 1U << 5,
-    ANE_FUZZ_FLAG_TYPE_AS_NUMBER = 1U << 6,
+    ANE_FUZZ_FLAG_BATCHES_AS_STRING = 1U << 0U,
+    ANE_FUZZ_FLAG_CHANNELS_AS_STRING = 1U << 1U,
+    ANE_FUZZ_FLAG_DEPTH_AS_STRING = 1U << 2U,
+    ANE_FUZZ_FLAG_HEIGHT_AS_STRING = 1U << 3U,
+    ANE_FUZZ_FLAG_WIDTH_AS_STRING = 1U << 4U,
+    ANE_FUZZ_FLAG_NAME_AS_NUMBER = 1U << 5U,
+    ANE_FUZZ_FLAG_TYPE_AS_NUMBER = 1U << 6U,
 } AneFuzzFlag;
 
 typedef struct AneFuzzCase {
@@ -769,21 +769,21 @@ AneStatus _ane_internal_fuzz_parse_one(const AneFuzzCase* fc);
  * mutates a key to test the type-checks in `derive_specs_from_attrs`. */
 typedef enum {
     /* Replace `NetworkStatusList` value with a non-array. */
-    ANE_FUZZ_ATTRS_NSL_NOT_ARRAY = 1U << 0,
+    ANE_FUZZ_ATTRS_NSL_NOT_ARRAY = 1U << 0U,
     /* Omit `NetworkStatusList` entirely. */
-    ANE_FUZZ_ATTRS_NSL_MISSING = 1U << 1,
+    ANE_FUZZ_ATTRS_NSL_MISSING = 1U << 1U,
     /* `NetworkStatusList` is an empty array. */
-    ANE_FUZZ_ATTRS_NSL_EMPTY = 1U << 2,
+    ANE_FUZZ_ATTRS_NSL_EMPTY = 1U << 2U,
     /* `NetworkStatusList[0]` is not a dictionary. */
-    ANE_FUZZ_ATTRS_PROC_NOT_DICT = 1U << 3,
+    ANE_FUZZ_ATTRS_PROC_NOT_DICT = 1U << 3U,
     /* Omit `LiveInputList` from the procedure dict. */
-    ANE_FUZZ_ATTRS_LIVEIN_MISSING = 1U << 4,
+    ANE_FUZZ_ATTRS_LIVEIN_MISSING = 1U << 4U,
     /* Omit `LiveOutputList` from the procedure dict. */
-    ANE_FUZZ_ATTRS_LIVEOUT_MISSING = 1U << 5,
+    ANE_FUZZ_ATTRS_LIVEOUT_MISSING = 1U << 5U,
     /* `LiveInputList` is not an array. */
-    ANE_FUZZ_ATTRS_LIVEIN_NOT_ARRAY = 1U << 6,
+    ANE_FUZZ_ATTRS_LIVEIN_NOT_ARRAY = 1U << 6U,
     /* `LiveOutputList` is not an array. */
-    ANE_FUZZ_ATTRS_LIVEOUT_NOT_ARRAY = 1U << 7,
+    ANE_FUZZ_ATTRS_LIVEOUT_NOT_ARRAY = 1U << 7U,
 } AneFuzzAttrsMutation;
 
 typedef struct AneFuzzAttrsCase {
