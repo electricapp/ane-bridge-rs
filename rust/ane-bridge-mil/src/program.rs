@@ -416,7 +416,14 @@ fn mat_dims<'val>(what: &str, v: &'val Val) -> (&'val [i64], [i64; 2]) {
 /// The kernel's dilated span is subtracted from the padded input, and what is
 /// left is stepped over by `stride`. A non-positive `stride` yields 1, which
 /// [`Graph::conv`] then rejects as a degenerate output.
-fn conv_extent(extent: i64, pad_lo: i64, pad_hi: i64, dilation: i64, kernel: i64, stride: i64) -> i64 {
+fn conv_extent(
+    extent: i64,
+    pad_lo: i64,
+    pad_hi: i64,
+    dilation: i64,
+    kernel: i64,
+    stride: i64,
+) -> i64 {
     let span = dilation
         .saturating_mul(kernel.saturating_sub(1))
         .saturating_add(1);
@@ -435,7 +442,11 @@ fn conv_extent(extent: i64, pad_lo: i64, pad_hi: i64, dilation: i64, kernel: i64
 /// Panics if `axis` names no dimension of `shape`.
 fn axis_index(what: &str, shape: &[i64], axis: i64) -> usize {
     let rank = i64::try_from(shape.len()).unwrap_or(i64::MAX);
-    let resolved = if axis < 0 { rank.saturating_add(axis) } else { axis };
+    let resolved = if axis < 0 {
+        rank.saturating_add(axis)
+    } else {
+        axis
+    };
     assert!(
         0 <= resolved && resolved < rank,
         "{what}: axis {axis} is outside a rank-{rank} tensor"
@@ -1233,7 +1244,11 @@ impl Graph {
         // `0..rank` — including one that does not survive the conversion —
         // saturates to a value the assert rejects.
         let from_end = i64::try_from(rank).unwrap_or(i64::MAX);
-        let resolved = if axis < 0 { axis.saturating_add(from_end) } else { axis };
+        let resolved = if axis < 0 {
+            axis.saturating_add(from_end)
+        } else {
+            axis
+        };
         let ax = usize::try_from(resolved).unwrap_or(usize::MAX);
         assert!(
             ax < rank,
@@ -1258,21 +1273,16 @@ impl Graph {
             assert_eq!(
                 v.dtype, first.dtype,
                 "concat: operand {} is {:?} but operand 0 is {:?}",
-                i,
-                v.dtype,
-                first.dtype
+                i, v.dtype, first.dtype
             );
             for (d, (&a, &b)) in first.shape.iter().zip(&v.shape).enumerate() {
                 if d == ax {
                     cat = cat.saturating_add(b);
                 } else {
                     assert_eq!(
-                        a,
-                        b,
+                        a, b,
                         "concat on axis {ax}: operand {} shape {:?} disagrees with {:?} at dim {d}",
-                        i,
-                        v.shape,
-                        first.shape
+                        i, v.shape, first.shape
                     );
                 }
             }
@@ -1292,7 +1302,9 @@ impl Graph {
             dtype: first.dtype,
             shape,
         };
-        let operands: Vec<&Val> = core::iter::once(first).chain(rest.iter().copied()).collect();
+        let operands: Vec<&Val> = core::iter::once(first)
+            .chain(rest.iter().copied())
+            .collect();
         let list = operands
             .iter()
             .map(|v| v.name.as_str())
@@ -1403,7 +1415,8 @@ impl Graph {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let mut mil = String::with_capacity(self.stmts.len().saturating_mul(128).saturating_add(4096));
+        let mut mil =
+            String::with_capacity(self.stmts.len().saturating_mul(128).saturating_add(4096));
         line(&mut mil, format_args!("program(1.3)"));
         line(&mut mil, format_args!("[buildInfo = {build_info}]"));
         line(&mut mil, format_args!("{{"));
@@ -1845,11 +1858,7 @@ mod tests {
         let (heads, width) = (4, 16);
         let mut taken = Vec::new();
         for h in 0..heads {
-            taken.push(graph.slice(
-                &ring,
-                &[0, 0, 0, h * width],
-                &[1, 16, 64, (h + 1) * width],
-            ));
+            taken.push(graph.slice(&ring, &[0, 0, 0, h * width], &[1, 16, 64, (h + 1) * width]));
         }
         let traffic = graph.traffic();
 
@@ -1903,8 +1912,14 @@ mod tests {
 
         assert_eq!(y.shape(), [1, 4, 1, 32], "layer_norm preserves shape");
         assert!(mil.contains("tensor<int32, [1]> cv_2 ="), "{mil}");
-        assert!(mil.contains("val = tensor<int32, [1]>([1])"), "axis 1: {mil}");
-        assert!(mil.contains("fp16 ck_3 ="), "epsilon takes x's dtype: {mil}");
+        assert!(
+            mil.contains("val = tensor<int32, [1]>([1])"),
+            "axis 1: {mil}"
+        );
+        assert!(
+            mil.contains("fp16 ck_3 ="),
+            "epsilon takes x's dtype: {mil}"
+        );
         assert!(
             mil.contains("layer_norm(axes = cv_2, beta = w_1, epsilon = ck_3, gamma = w_0, x = x)"),
             "{mil}"

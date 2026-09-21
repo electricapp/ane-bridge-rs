@@ -50,7 +50,7 @@ jobs:
       # ----- Python (for the identity-model generator script) -----
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: "3.11.16"
 
       # tools/make_identity_model.py drives its CLI with typer + rich; the
       # bare setup-python toolchain has neither, so install them explicitly.
@@ -59,9 +59,9 @@ jobs:
         run: python3 -m pip install "typer==0.23.2" "rich==15.0.0"
 
       # ----- Rust toolchain -----
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1 rolling tag; this SHA is the pin
         with:
-          toolchain: stable
+          toolchain: 1.98.1
           components: clippy, rustfmt
 
       - name: Show toolchain
@@ -179,7 +179,7 @@ jobs:
       # ----- Python (for the identity-model generator script) -----
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: "3.11.16"
 
       # tools/make_identity_model.py drives its CLI with typer + rich; the
       # bare setup-python toolchain has neither, so install them explicitly.
@@ -188,9 +188,9 @@ jobs:
         run: python3 -m pip install "typer==0.23.2" "rich==15.0.0"
 
       # ----- Rust toolchain -----
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1 rolling tag; this SHA is the pin
         with:
-          toolchain: stable
+          toolchain: 1.98.1
           components: clippy, rustfmt
 
       # ----- Cargo cache -----

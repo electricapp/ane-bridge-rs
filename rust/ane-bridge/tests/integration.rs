@@ -288,9 +288,9 @@ fn round_trip_zero_copy() {
     let out_buf = m.output_buffer(0).unwrap();
     in_buf
         .with_locked(BufferAccess::Write, |bytes| {
-            for (i, chunk) in bytes.chunks_exact_mut(4).enumerate() {
+            for (i, chunk) in bytes.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let v = (i as f32) * 0.02;
-                chunk.copy_from_slice(&v.to_le_bytes());
+                *chunk = v.to_le_bytes();
             }
         })
         .unwrap();

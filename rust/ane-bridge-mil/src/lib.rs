@@ -51,7 +51,5 @@
 pub mod program;
 pub mod weights;
 
-pub use program::{
-    ConvOpts, Dtype, Graph, MAX_CONV_KERNEL, Norm, Pad, Traffic, Val, WIDTH_ALIGN,
-};
+pub use program::{ConvOpts, Dtype, Graph, MAX_CONV_KERNEL, Norm, Pad, Traffic, Val, WIDTH_ALIGN};
 pub use weights::{BlobDtype, BlobOffset, BlobWriter};

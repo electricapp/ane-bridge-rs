@@ -94,9 +94,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Fill the input directly through the mapped pointer.
     in_buf.with_locked(BufferAccess::Write, |bytes| {
-        for (i, chunk) in bytes.chunks_exact_mut(4).enumerate() {
+        for (i, chunk) in bytes.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let v = (i as f32) * 0.01;
-            chunk.copy_from_slice(&v.to_le_bytes());
+            *chunk = v.to_le_bytes();
         }
     })?;
 
@@ -127,8 +127,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_ref = req.output_buffer_mut(0).expect("output bound");
     let ok = out_ref.with_locked(BufferAccess::Read, |bytes| {
         let mut all_ok = true;
-        for (i, chunk) in bytes.chunks_exact(4).take(8).enumerate() {
-            let v = f32::from_le_bytes(chunk.try_into().expect("4-byte chunk"));
+        for (i, chunk) in bytes.as_chunks::<4>().0.iter().take(8).enumerate() {
+            let v = f32::from_le_bytes(*chunk);
             let expected = (i as f32) * 0.01;
             if (v - expected).abs() > 1e-2 {
                 all_ok = false;

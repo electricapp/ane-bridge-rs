@@ -400,8 +400,8 @@ fn bind_then_drop_user_handle_still_works() {
 
     let mut out = vec![0_u8; n_elem * 4];
     req.get_output_bytes(0, &mut out).expect("read output back");
-    for (i, chunk) in out.chunks_exact(4).take(8).enumerate() {
-        let v = f32::from_le_bytes(chunk.try_into().unwrap());
+    for (i, chunk) in out.as_chunks::<4>().0.iter().take(8).enumerate() {
+        let v = f32::from_le_bytes(*chunk);
         let expected = (i as f32) * 0.01;
         assert!((v - expected).abs() < 1e-2, "i={i} got {v}");
     }

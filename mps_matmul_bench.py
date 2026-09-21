@@ -1,12 +1,13 @@
 # /// script
 # requires-python = ">=3.11,<3.14"
 # dependencies = [
-#     "torch>=2.2",
-#     "mlx>=0.18 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
-#     "coremltools>=7.2 ; sys_platform == 'darwin'",
-#     "numpy>=1.26",
-#     "rich>=13",
-#     "typer>=0.12",
+#     "torch==2.14.0",
+#     "mlx==0.32.2 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+#     "coremltools==9.0 ; sys_platform == 'darwin'",
+#     "numpy==2.4.6 ; python_full_version < '3.12'",
+#     "numpy==2.5.3 ; python_full_version >= '3.12'",
+#     "rich==15.0.0",
+#     "typer==0.27.2",
 # ]
 # ///
 """

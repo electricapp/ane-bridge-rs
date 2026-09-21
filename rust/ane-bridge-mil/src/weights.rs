@@ -219,8 +219,10 @@ mod tests {
     /// A payload of `i32`.
     fn i32s(payload: &[u8]) -> Vec<i32> {
         payload
-            .chunks_exact(4)
-            .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_le_bytes(*c))
             .collect()
     }
 

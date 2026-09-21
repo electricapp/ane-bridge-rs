@@ -17,7 +17,7 @@ description   = "Write MIL programs for the Apple Neural Engine in Rust, with th
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-half = "2.7"
+half = "2.7.1"
 
 [lints]
 workspace = true
