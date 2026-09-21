@@ -41,9 +41,13 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
           rustup default "$RUST_TOOLCHAIN"
 
+      # cargo-audit is pinned, so it has to be bumped when the advisory
+      # database starts using a format it cannot read. 0.21.2 parsed no
+      # CVSS v4.0 vector, and RUSTSEC-2026-0180 carries one, so every run
+      # died loading the database rather than on any finding of ours.
       - name: Install cargo-audit + cargo-deny
         run: |
-          cargo install cargo-audit@0.21.2 --locked
+          cargo install cargo-audit@0.22.2 --locked
           cargo install cargo-deny@0.19.5 --locked
 
       - name: Advisory + yanked audit (committed lockfile)

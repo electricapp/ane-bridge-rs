@@ -1386,6 +1386,7 @@ static id build_ane_request(AneRequest* r, AneStatus* status_out) {
      * Wrap our single sink in a one-element array. */
     id perf_obj = r->perf_stats ? (id) @[*(id*)r->perf_stats] : nil;
     id events_obj = r->shared_events ? *(id*)r->shared_events : nil;
+    // NOLINTNEXTLINE(readability-redundant-parentheses): @() boxing requires parens
     NSNumber* proc_num = @(r->procedure_index);
 
     SEL full_sel = sel_getUid("requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:"
@@ -3137,8 +3138,9 @@ AneStatus ane_chain_create(const AneChainStep* steps, int32_t n_steps, AneChain*
             id step = ((id(*)(Class, SEL, id, id, long long, long long, id, id, unsigned long long,
                               unsigned long long, unsigned long long))objc_msgSend)(
                 g_AneChainingRequestCls, s, inSets, outSets, (long long)steps[i].lb_input_symbol_id,
-                (long long)steps[i].lb_output_symbol_id, @(rq->procedure_index), signals,
-                (unsigned long long)rq->transaction_handle,
+                (long long)steps[i].lb_output_symbol_id,
+                // NOLINTNEXTLINE(readability-redundant-parentheses): @() boxing requires parens
+                @(rq->procedure_index), signals, (unsigned long long)rq->transaction_handle,
                 (unsigned long long)steps[i].fw_enqueue_delay,
                 (unsigned long long)steps[i].memory_pool_id);
             if (!step) {
