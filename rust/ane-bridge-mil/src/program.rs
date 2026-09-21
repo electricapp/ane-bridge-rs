@@ -175,7 +175,17 @@ struct Op {
     /// SSA name of the result.
     result: String,
     /// SSA names of the tensor operands, one entry per use.
+    ///
+    /// For reachability, not for pricing: an operand appears here whether the
+    /// op reads all of it or part of it.
     reads: Vec<String>,
+    /// Bytes actually pulled in from those operands.
+    ///
+    /// Usually every operand in full, but an op that touches only part of what
+    /// it names moves what it takes rather than what it points at — a slice
+    /// reaching one head out of a resident KV ring reads that head, not the
+    /// ring.
+    read_bytes: usize,
 }
 
 /// Bytes a program moves per dispatch.
@@ -236,6 +246,8 @@ pub struct Graph {
     blob: BlobWriter,
     /// Monotonic counter backing SSA name generation.
     next_id: usize,
+    /// Every name the program has minted or been given, so no two collide.
+    taken: std::collections::HashSet<String>,
     /// Set by [`Graph::raw_stmt`], whose reads are opaque to the dead-op check.
     has_raw_stmts: bool,
 }
@@ -417,6 +429,84 @@ fn conv_extent(extent: i64, pad_lo: i64, pad_hi: i64, dilation: i64, kernel: i64
         .saturating_add(1)
 }
 
+/// Resolve a MIL axis index, where a negative counts back from the end.
+///
+/// # Panics
+/// Panics if `axis` names no dimension of `shape`.
+fn axis_index(what: &str, shape: &[i64], axis: i64) -> usize {
+    let rank = i64::try_from(shape.len()).unwrap_or(i64::MAX);
+    let resolved = if axis < 0 { rank.saturating_add(axis) } else { axis };
+    assert!(
+        0 <= resolved && resolved < rank,
+        "{what}: axis {axis} is outside a rank-{rank} tensor"
+    );
+    usize::try_from(resolved).unwrap_or(0)
+}
+
+/// How a normalization reduces, and the affine it applies afterwards.
+///
+/// The three travel together because they constrain each other: `gamma` and
+/// `beta` have to be shaped like the extents of exactly the axes being reduced.
+#[derive(Clone, Copy, Debug)]
+pub struct Norm<'val> {
+    /// Axes to compute the mean and variance over. Negatives count from the end.
+    pub axes: &'val [i64],
+    /// Per-element scale, shaped like the extents of `axes`.
+    pub gamma: &'val Val,
+    /// Per-element shift, shaped like `gamma`.
+    pub beta: &'val Val,
+    /// Added to the variance before the reciprocal square root.
+    pub epsilon: f32,
+}
+
+impl<'val> Norm<'val> {
+    /// Normalize each spatial position over the channel axis of an NCHW tensor.
+    ///
+    /// This is what a transformer's `LayerNorm` becomes once its activations
+    /// are carried as `[N, C, H, W]` with the model dimension in `C`.
+    #[must_use]
+    pub const fn channels(gamma: &'val Val, beta: &'val Val) -> Self {
+        Self {
+            axes: &[1],
+            gamma,
+            beta,
+            epsilon: 1e-5,
+        }
+    }
+
+    /// Panic unless this normalization is well formed for `x`.
+    fn check(&self, x: &Val) {
+        assert!(!self.axes.is_empty(), "layer_norm: needs at least one axis");
+        assert!(
+            self.epsilon > 0.0,
+            "layer_norm: epsilon {} must be positive, or the reciprocal square \
+             root of a zero variance is infinite",
+            self.epsilon
+        );
+        let mut extents: Vec<i64> = Vec::with_capacity(self.axes.len());
+        let mut seen: Vec<usize> = Vec::with_capacity(self.axes.len());
+        for &axis in self.axes {
+            let d = axis_index("layer_norm", &x.shape, axis);
+            assert!(!seen.contains(&d), "layer_norm: axis {axis} is repeated");
+            seen.push(d);
+            extents.push(x.shape.get(d).copied().unwrap_or(0));
+        }
+        for (what, v) in [("gamma", self.gamma), ("beta", self.beta)] {
+            assert_eq!(
+                v.shape, extents,
+                "layer_norm: {what} {:?} is shaped {:?}, but normalizing axes \
+                 {:?} of {:?} needs {extents:?}",
+                v.name, v.shape, self.axes, x.shape
+            );
+            assert_eq!(
+                v.dtype, x.dtype,
+                "layer_norm: {what} is {:?} but x is {:?}; MIL does not promote",
+                v.dtype, x.dtype
+            );
+        }
+    }
+}
+
 /// Panic unless `shape`'s last dimension satisfies [`WIDTH_ALIGN`].
 fn assert_width_aligned(what: &str, name: &str, shape: &[i64]) {
     let w = shape.last().copied().unwrap_or(0);
@@ -452,15 +542,26 @@ impl Graph {
             sizes: std::collections::HashMap::new(),
             blob: BlobWriter::new(),
             next_id: 0,
+            taken: std::collections::HashSet::new(),
             has_raw_stmts: false,
         }
     }
 
-    /// Mint a fresh SSA name with the given prefix.
+    /// Mint an SSA name with the given prefix that nothing else in the program
+    /// holds.
+    ///
+    /// Callers can supply their own names — [`Graph::input`] and
+    /// [`Graph::rename`] both take one — so a minted name skips past anything
+    /// already taken rather than assuming the counter alone keeps it unique.
     fn fresh(&mut self, prefix: &str) -> String {
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
-        format!("{prefix}_{id}")
+        loop {
+            let id = self.next_id;
+            self.next_id = self.next_id.saturating_add(1);
+            let name = format!("{prefix}_{id}");
+            if self.taken.insert(name.clone()) {
+                return name;
+            }
+        }
     }
 
     /// Record a tensor's size so traffic through it can be priced later.
@@ -478,10 +579,24 @@ impl Graph {
 
     /// Record an emitted op and the tensors it reads.
     fn note(&mut self, out: &Val, reads: &[&Val]) {
+        let bytes = reads
+            .iter()
+            .map(|v| self.sizes.get(&v.name).copied().unwrap_or(0))
+            .fold(0usize, usize::saturating_add);
+        self.note_reading(out, reads, bytes);
+    }
+
+    /// Record an op that moves `bytes` rather than the whole of its operands.
+    ///
+    /// A slice is the case that matters: naming a resident buffer is not the
+    /// same as reading it, and charging one would put a program's cost an
+    /// order of magnitude above what the hardware actually moves.
+    fn note_reading(&mut self, out: &Val, reads: &[&Val], bytes: usize) {
         self.size_of(out);
         self.ops.push(Op {
             result: out.name.clone(),
             reads: reads.iter().map(|v| v.name.clone()).collect(),
+            read_bytes: bytes,
         });
     }
 
@@ -511,9 +626,7 @@ impl Graph {
             t.written = t
                 .written
                 .saturating_add(self.sizes.get(&op.result).copied().unwrap_or(0));
-            for r in &op.reads {
-                t.read = t.read.saturating_add(self.sizes.get(r).copied().unwrap_or(0));
-            }
+            t.read = t.read.saturating_add(op.read_bytes);
         }
         t
     }
@@ -525,14 +638,14 @@ impl Graph {
     /// identifier and unique within the program.
     ///
     /// # Panics
-    /// Panics if `name` is not a bare identifier, collides with an existing
-    /// parameter, or if `shape` has a non-positive dimension. A dynamic
+    /// Panics if `name` is not a bare identifier, collides with a name already
+    /// in the program, or if `shape` has a non-positive dimension. A dynamic
     /// dimension is not expressible: the framework rejects the program.
     pub fn input(&mut self, name: &str, dtype: Dtype, shape: &[i64]) -> Val {
         assert!(is_ident(name), "input: {name:?} is not a MIL identifier");
         assert!(
-            !self.params.iter().any(|p| p.name == name),
-            "input: parameter {name:?} is already declared"
+            self.taken.insert(name.to_owned()),
+            "input: {name:?} already names a value in this program"
         );
         assert!(
             shape.iter().all(|&d| d > 0),
@@ -590,6 +703,19 @@ impl Graph {
         let n = self.fresh("ci");
         self.stmts.push(format!(
             "int32 {n} = const()[name = string(\"{n}\"), val = int32({value})];"
+        ));
+        n
+    }
+
+    /// A scalar attribute constant of the given numeric type.
+    ///
+    /// MIL types an op's scalar attributes by the tensor they apply to, so
+    /// this takes the dtype from the operand rather than picking one.
+    fn const_scalar(&mut self, dtype: Dtype, value: f32) -> String {
+        let n = self.fresh("ck");
+        let ty = dtype.mil();
+        self.stmts.push(format!(
+            "{ty} {n} = const()[name = string(\"{n}\"), val = {ty}({value:?})];"
         ));
         n
     }
@@ -777,6 +903,100 @@ impl Graph {
         self.unary("tanh", x)
     }
 
+    /// `silu(x)`, the `x * sigmoid(x)` activation.
+    ///
+    /// One op rather than a `sigmoid` and a `mul`: those would write and
+    /// re-read a whole tensor between them, since the ANE does not fuse.
+    pub fn silu(&mut self, x: &Val) -> Val {
+        self.unary("silu", x)
+    }
+
+    /// `softmax(x, axis)`, where a negative `axis` counts from the end.
+    ///
+    /// # Panics
+    /// Panics if `axis` is outside `x`'s rank.
+    pub fn softmax(&mut self, x: &Val, axis: i64) -> Val {
+        axis_index("softmax", &x.shape, axis);
+        let a = self.const_i32(axis);
+        let out = Val {
+            name: self.fresh("sm"),
+            dtype: x.dtype,
+            shape: x.shape.clone(),
+        };
+        self.stmts.push(format!(
+            "{} {} = softmax(axis = {a}, x = {})[name = string(\"{}\")];",
+            out.ty(),
+            out.name,
+            x.name,
+            out.name
+        ));
+        self.note(&out, &[x]);
+        out
+    }
+
+    /// `layer_norm(x, ...)`: normalize over [`Norm::axes`], then scale and shift.
+    ///
+    /// # Panics
+    /// Panics if an axis is out of range or repeated, if `gamma` or `beta` is
+    /// not shaped like the extents of those axes, if either has a dtype other
+    /// than `x`'s, or if `epsilon` is not positive.
+    pub fn layer_norm(&mut self, x: &Val, norm: Norm<'_>) -> Val {
+        norm.check(x);
+        let axes = self.const_i32_vec(norm.axes);
+        let eps = self.const_scalar(x.dtype, norm.epsilon);
+        let out = Val {
+            name: self.fresh("ln"),
+            dtype: x.dtype,
+            shape: x.shape.clone(),
+        };
+        self.stmts.push(format!(
+            "{} {} = layer_norm(axes = {axes}, beta = {}, epsilon = {eps}, gamma = {}, x = {})[name = string(\"{}\")];",
+            out.ty(),
+            out.name,
+            norm.beta.name,
+            norm.gamma.name,
+            x.name,
+            out.name
+        ));
+        self.note(&out, &[x, norm.gamma, norm.beta]);
+        out
+    }
+
+    /// Re-emit `x` under the SSA name `name`.
+    ///
+    /// The framework names an output port after the SSA value the function
+    /// returns, and resolves ports by name, so a value a caller must find
+    /// under a particular name needs that name in the program text — while
+    /// builder results are named automatically.
+    ///
+    /// This emits an `identity`, which the compiler folds away: against the
+    /// same program without one, a dispatch takes the same time from 0.25 MB
+    /// to 16 MB, where copying the largest would have cost ~150 us.
+    /// [`Graph::traffic`] still counts it, because it prices what the program
+    /// says rather than what the compiler makes of it.
+    ///
+    /// # Panics
+    /// Panics if `name` is not a bare MIL identifier, or is already taken.
+    pub fn rename(&mut self, name: &str, x: &Val) -> Val {
+        assert!(is_ident(name), "rename: {name:?} is not a MIL identifier");
+        assert!(
+            self.taken.insert(name.to_owned()),
+            "rename: {name:?} already names a value in this program"
+        );
+        let out = Val {
+            name: name.to_owned(),
+            dtype: x.dtype,
+            shape: x.shape.clone(),
+        };
+        self.stmts.push(format!(
+            "{} {name} = identity(x = {})[name = string(\"{name}\")];",
+            out.ty(),
+            x.name
+        ));
+        self.note(&out, &[x]);
+        out
+    }
+
     /// `maximum(x, y)`, composed as `y + relu(x - y)`.
     ///
     /// MIL has a `maximum` op but it does not appear in any ANE-verified model,
@@ -859,11 +1079,15 @@ impl Graph {
 
     /// `matmul(x, y)` with optional operand transposes.
     ///
-    /// Batched rank-4 `[B, H, M, K] x [B, H, K, N]` is supported, as is rank-2.
+    /// Everything but the trailing two dimensions is a batch, and batches
+    /// broadcast: `[1, B, M, K] x [1, N, K]` transposed scores every lane
+    /// against one shared table, which is the shape a relative-position term
+    /// or a shared projection takes.
     ///
     /// # Panics
-    /// Panics if either operand is rank 1, if the batch dimensions disagree, or
-    /// if the inner dimensions do not match after the requested transposes.
+    /// Panics if either operand is rank 1, if the batch dimensions do not
+    /// broadcast, or if the inner dimensions do not match after the requested
+    /// transposes.
     pub fn matmul(&mut self, x: &Val, y: &Val, transpose_x: bool, transpose_y: bool) -> Val {
         assert_eq!(
             x.dtype, y.dtype,
@@ -873,14 +1097,13 @@ impl Graph {
         let (x_batch, [x_rows, x_cols]) = mat_dims("matmul: x", x);
         let (y_batch, [y_rows, y_cols]) = mat_dims("matmul: y", y);
 
-        // MIL broadcasts batch dims, but the ANE lowering does not: a mismatch
-        // here compiles and then produces a differently shaped tensor than the
-        // rest of the graph was built against. Equal batch dims also imply
-        // equal rank.
-        assert_eq!(
-            x_batch, y_batch,
-            "matmul: batch dims {x_batch:?} and {y_batch:?} disagree"
-        );
+        // Batch dims broadcast, numpy style, which is how one shared table is
+        // scored against every lane without a copy per lane. Measured: a
+        // [1, B, T, K] x [1, N, K] transposed product, whose operands differ
+        // in rank, comes back within 0.04% of the magnitude of the same
+        // product computed on the host, which is fp16 rounding on a K-term
+        // dot and nothing more.
+        let batch = broadcast("matmul: batch dims", x_batch, y_batch);
 
         let (m, kx) = if transpose_x {
             (x_cols, x_rows)
@@ -894,7 +1117,7 @@ impl Graph {
         };
         assert_eq!(kx, ky, "matmul: inner dims {kx} and {ky} disagree");
 
-        let mut shape = x_batch.to_vec();
+        let mut shape = batch;
         shape.push(m);
         shape.push(n);
 
@@ -1131,7 +1354,10 @@ impl Graph {
             x.name,
             out.name
         ));
-        self.note(&out, &[x]);
+        // A slice moves what it takes, not what it points into.
+        self.size_of(&out);
+        let bytes = self.sizes.get(&out.name).copied().unwrap_or(0);
+        self.note_reading(&out, &[x], bytes);
         out
     }
 
@@ -1437,15 +1663,26 @@ mod tests {
         ));
     }
 
-    /// Batch dims are not broadcast by the ANE lowering, so a mismatch has to
-    /// fail here rather than produce an unexpectedly shaped tensor.
+    /// Batch dims of 2 and 3 line up in neither direction, so the product has
+    /// no shape and has to fail here rather than come back as something else.
     #[test]
     #[should_panic(expected = "batch dims")]
-    fn matmul_rejects_mismatched_batch_dims() {
+    fn matmul_rejects_batch_dims_that_do_not_broadcast() {
         let mut g = Graph::new("test-7");
         let a = g.input("a", Dtype::Fp16, &[1, 2, 16, 32]);
         let b = g.input("b", Dtype::Fp16, &[1, 3, 32, 32]);
         drop(g.matmul(&a, &b, false, false));
+    }
+
+    /// One shared table scored against every lane: the operands differ in
+    /// rank, and the batch broadcasts to the wider one.
+    #[test]
+    fn matmul_broadcasts_a_shared_operand_across_lanes() {
+        let mut g = Graph::new("test-7b");
+        let lanes = g.input("lanes", Dtype::Fp16, &[1, 96, 2, 128]);
+        let table = g.weight_fp16(&[1, 72, 128], &vec![0.5; 72 * 128]);
+        let scores = g.matmul(&lanes, &table, false, true);
+        assert_eq!(scores.shape(), [1, 96, 2, 72]);
     }
 
     /// Concat only joins along one axis; everything else must already agree.
@@ -1594,6 +1831,37 @@ mod tests {
         drop(out);
     }
 
+    /// A slice moves the bytes it takes, not the bytes of the buffer it names.
+    ///
+    /// The difference is the whole cost of a resident cache: a graph that
+    /// takes one head out of a KV ring sixteen times reads the ring once over,
+    /// not sixteen times over, and charging it the latter puts the program an
+    /// order of magnitude above what the hardware moves.
+    #[test]
+    fn a_slice_is_charged_for_what_it_takes() {
+        let mut graph = Graph::new("test-slice-traffic");
+        // A resident ring: 16 lanes x 64 frames x 64 lanes of fp16 = 128 KiB.
+        let ring = graph.input("ring", Dtype::Fp16, &[1, 16, 64, 64]);
+        let (heads, width) = (4, 16);
+        let mut taken = Vec::new();
+        for h in 0..heads {
+            taken.push(graph.slice(
+                &ring,
+                &[0, 0, 0, h * width],
+                &[1, 16, 64, (h + 1) * width],
+            ));
+        }
+        let traffic = graph.traffic();
+
+        let ring_bytes = 16 * 64 * 64 * 2;
+        assert_eq!(
+            traffic.read, ring_bytes,
+            "four disjoint slices read the ring exactly once over"
+        );
+        assert_eq!(traffic.written, ring_bytes, "and write the same out");
+        drop(taken);
+    }
+
     /// Weights are re-read on every dispatch, so they are traffic too.
     #[test]
     fn traffic_includes_weights() {
@@ -1620,6 +1888,160 @@ mod tests {
             broadcast("mul", &[1, 4, 1, 8], &[1, 4, 1, 1]),
             vec![1, 4, 1, 8]
         );
+    }
+
+    /// `layer_norm` must name its gamma and beta and carry a dtype-matched
+    /// epsilon, and `Norm::channels` must target the NCHW channel axis.
+    #[test]
+    fn layer_norm_emits_affine_and_epsilon() {
+        let mut g = Graph::new("test-ln");
+        let x = g.input("x", Dtype::Fp16, &[1, 4, 1, 32]);
+        let gamma = g.weight_fp16(&[4], &[1.0, 1.0, 1.0, 1.0]);
+        let beta = g.weight_fp16(&[4], &[0.0, 0.0, 0.0, 0.0]);
+        let y = g.layer_norm(&x, Norm::channels(&gamma, &beta));
+        let (mil, _) = g.finish(&[&y]);
+
+        assert_eq!(y.shape(), [1, 4, 1, 32], "layer_norm preserves shape");
+        assert!(mil.contains("tensor<int32, [1]> cv_2 ="), "{mil}");
+        assert!(mil.contains("val = tensor<int32, [1]>([1])"), "axis 1: {mil}");
+        assert!(mil.contains("fp16 ck_3 ="), "epsilon takes x's dtype: {mil}");
+        assert!(
+            mil.contains("layer_norm(axes = cv_2, beta = w_1, epsilon = ck_3, gamma = w_0, x = x)"),
+            "{mil}"
+        );
+    }
+
+    /// Gamma shaped unlike the axes being normalized is the silent case --
+    /// MIL would broadcast it -- so the builder rejects it.
+    #[test]
+    #[should_panic(expected = "needs [4]")]
+    fn layer_norm_rejects_mismatched_gamma() {
+        let mut g = Graph::new("test-ln-bad");
+        let x = g.input("x", Dtype::Fp16, &[1, 4, 1, 32]);
+        let gamma = g.weight_fp16(&[32], &[1.0; 32]);
+        let beta = g.weight_fp16(&[32], &[0.0; 32]);
+        drop(g.layer_norm(&x, Norm::channels(&gamma, &beta)));
+    }
+
+    /// An axis listed twice would halve the variance it contributes to.
+    #[test]
+    #[should_panic(expected = "axis 1 is repeated")]
+    fn layer_norm_rejects_repeated_axis() {
+        let mut g = Graph::new("test-ln-dup");
+        let x = g.input("x", Dtype::Fp16, &[1, 4, 1, 32]);
+        let gamma = g.weight_fp16(&[4, 4], &[1.0; 16]);
+        let beta = g.weight_fp16(&[4, 4], &[0.0; 16]);
+        drop(g.layer_norm(
+            &x,
+            Norm {
+                axes: &[1, 1],
+                gamma: &gamma,
+                beta: &beta,
+                epsilon: 1e-5,
+            },
+        ));
+    }
+
+    /// A zero epsilon makes the reciprocal square root of a constant row
+    /// infinite, which reaches the output as NaN rather than as an error.
+    #[test]
+    #[should_panic(expected = "must be positive")]
+    fn layer_norm_rejects_zero_epsilon() {
+        let mut g = Graph::new("test-ln-eps");
+        let x = g.input("x", Dtype::Fp16, &[1, 4, 1, 32]);
+        let gamma = g.weight_fp16(&[4], &[1.0; 4]);
+        let beta = g.weight_fp16(&[4], &[0.0; 4]);
+        drop(g.layer_norm(
+            &x,
+            Norm {
+                axes: &[1],
+                gamma: &gamma,
+                beta: &beta,
+                epsilon: 0.0,
+            },
+        ));
+    }
+
+    /// `softmax` takes a negative axis the way MIL does, and keeps the shape.
+    #[test]
+    fn softmax_accepts_a_trailing_axis() {
+        let mut g = Graph::new("test-sm");
+        let x = g.input("x", Dtype::Fp16, &[1, 4, 2, 32]);
+        let y = g.softmax(&x, -1);
+        let (mil, _) = g.finish(&[&y]);
+
+        assert_eq!(y.shape(), [1, 4, 2, 32]);
+        assert!(mil.contains("int32 ci_0 = const()"), "{mil}");
+        assert!(mil.contains("val = int32(-1)"), "{mil}");
+        assert!(mil.contains("softmax(axis = ci_0, x = x)"), "{mil}");
+    }
+
+    /// An axis past the rank would normalize over something the tensor does
+    /// not have.
+    #[test]
+    #[should_panic(expected = "axis 4 is outside a rank-4 tensor")]
+    fn softmax_rejects_an_axis_past_the_rank() {
+        let mut g = Graph::new("test-sm-bad");
+        let x = g.input("x", Dtype::Fp16, &[1, 4, 2, 32]);
+        drop(g.softmax(&x, 4));
+    }
+
+    /// `silu` is one op, not a `sigmoid` and a `mul` -- the pair would double
+    /// the traffic of the largest tensor in a feed-forward block.
+    #[test]
+    fn silu_is_a_single_op() {
+        let mut g = Graph::new("test-silu");
+        let x = g.input("x", Dtype::Fp16, &[1, 4, 1, 32]);
+        let y = g.silu(&x);
+        let (mil, _) = g.finish(&[&y]);
+
+        assert!(mil.contains("silu(x = x)"), "{mil}");
+        assert_eq!(g.traffic().ops, 1, "one op");
+    }
+
+    /// A value that has to leave the program under a given port name gets it
+    /// from `rename`, and the name reaches both the SSA slot and the output
+    /// tuple.
+    #[test]
+    fn rename_binds_an_output_port_name() {
+        let mut g = Graph::new("test-rename");
+        let x = g.input("x", Dtype::Fp16, &[1, 4, 1, 32]);
+        let y = g.silu(&x);
+        let out = g.rename("new_kv", &y);
+        let (mil, _) = g.finish(&[&out]);
+
+        assert!(
+            mil.contains("tensor<fp16, [1, 4, 1, 32]> new_kv = identity(x = silu_0)"),
+            "{mil}"
+        );
+        assert!(mil.contains("-> (new_kv);"), "{mil}");
+    }
+
+    /// Two ports with one name is the failure `rename` exists to prevent, so
+    /// taking a name twice is an error rather than the later one winning.
+    #[test]
+    #[should_panic(expected = "already names a value")]
+    fn rename_rejects_a_name_already_taken() {
+        let mut g = Graph::new("test-rename-dup");
+        let x = g.input("x", Dtype::Fp16, &[1, 4, 1, 32]);
+        drop(g.rename("x", &x));
+    }
+
+    /// A caller-supplied name must not be handed out again by the generator.
+    /// The counter alone would do it: `ln_1` is both a name a caller may pick
+    /// and the second name a `layer_norm` would mint.
+    #[test]
+    fn generated_names_avoid_caller_supplied_ones() {
+        let mut g = Graph::new("test-collide");
+        let x = g.input("relu_1", Dtype::Fp16, &[1, 4, 1, 32]);
+        let first = g.relu(&x);
+        let second = g.relu(&first);
+        let (mil, _) = g.finish(&[&second]);
+
+        assert_eq!(first.name(), "relu_0");
+        assert_eq!(second.name(), "relu_2", "relu_1 is the input's name");
+        assert!(mil.contains("relu(x = relu_1)"), "{mil}");
+        assert!(mil.contains("relu(x = relu_0)"), "{mil}");
     }
 
     /// Two shapes that line up in neither direction are a build-time error,
