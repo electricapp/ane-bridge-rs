@@ -6,6 +6,7 @@
 #     "coremltools>=7.2 ; sys_platform == 'darwin'",
 #     "numpy>=1.26",
 #     "rich>=13",
+#     "typer>=0.12",
 # ]
 # ///
 """
@@ -16,20 +17,23 @@ Run any single rail or comma-separated combo:
     uv run mps_matmul_bench.py --backend mlx,ane
     uv run mps_matmul_bench.py --backend max          # mps + cpu-stress + ane
 
+    uv run mps_matmul_bench.py --help                 # full option reference
+
 Stop: Ctrl-C
 """
 
 from __future__ import annotations
 
-import argparse
 import subprocess
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from pathlib import Path
+from typing import Annotated, Any, NoReturn
 
+import typer
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
@@ -43,6 +47,12 @@ from rich.text import Text
 class Sample:
     t: float
     tflops: float
+
+
+class DType(StrEnum):
+    FP32 = "fp32"
+    FP16 = "fp16"
+    BF16 = "bf16"
 
 
 class Rail(StrEnum):
@@ -77,6 +87,21 @@ ANE_FLOPS_PER_INF = ANE_LAYERS * 2 * ANE_CHANNELS * ANE_CHANNELS * ANE_HW * ANE_
 ANE_CACHE_PATH = "/tmp/ane_stress.mlpackage"
 
 MAX_PANEL_WIDTH = 76
+
+console = Console()
+err_console = Console(stderr=True)
+
+app = typer.Typer(
+    add_completion=False,
+    rich_markup_mode="rich",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+
+
+def die(msg: str) -> NoReturn:
+    """Report a startup failure on stderr and exit non-zero."""
+    err_console.print(f"[bold red]error:[/] {msg}")
+    raise typer.Exit(1)
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────
@@ -456,31 +481,45 @@ def _cpu_neon_worker(counter: Any, stop_flag: Any, dtype_str: str, size: int) ->
 # ─── Main ───────────────────────────────────────────────────────────────
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Apple Silicon FLOPS bench")
-    ap.add_argument(
-        "--backend",
-        default=Rail.MPS.value,
-        help=(
-            "One rail or comma-separated combo. Rails: "
-            + ", ".join(Rail.values())
-            + ". Aliases: max/all. Example: --backend mlx,ane"
+@app.command()
+def main(
+    backend: Annotated[
+        str,
+        typer.Option(
+            "--backend",
+            "-b",
+            metavar="RAIL[,RAIL...]",
+            help=(
+                "One rail or comma-separated combo. Rails: "
+                + ", ".join(Rail.values())
+                + ". Aliases: max/all/cpu. Example: [bold]-b mlx,ane[/]"
+            ),
         ),
-    )
-    ap.add_argument("--n", type=int, default=4096, help="matrix size N (NxN)")
-    ap.add_argument("--dtype", choices=["fp32", "fp16", "bf16"], default="fp32")
-    ap.add_argument(
-        "--batch", type=int, default=8, help="matmuls per measurement window"
-    )
-    ap.add_argument(
-        "--workers", type=int, default=0, help="cpu-stress worker count (default=ncpu)"
-    )
-    ap.add_argument("--log", type=str, default=None, help="CSV log path")
-    args = ap.parse_args()
+    ] = Rail.MPS.value,
+    n: Annotated[
+        int, typer.Option("--n", "-n", min=64, help="matrix size N (N×N)")
+    ] = 4096,
+    dtype: Annotated[
+        DType,
+        typer.Option("--dtype", "-d", case_sensitive=False, help="element type"),
+    ] = DType.FP32,
+    batch: Annotated[
+        int, typer.Option(min=1, help="matmuls per measurement window")
+    ] = 8,
+    workers: Annotated[
+        int, typer.Option(min=0, help="cpu-stress worker count (0 = one per core)")
+    ] = 0,
+    log: Annotated[
+        Path | None,
+        typer.Option(dir_okay=False, writable=True, help="CSV log path"),
+    ] = None,
+) -> None:
+    """Apple Silicon FLOPS bench — continuous matmul stress + live TUI observer.
 
-    n_size = args.n
-    batch: int = args.batch
-    console = Console()
+    Stop with Ctrl-C; the all-time average prints on the way out.
+    """
+    n_size = n
+    dtype_str = dtype.value
     power = PowerMonitor()
     power.start(console)
 
@@ -490,7 +529,9 @@ def main() -> None:
         pass
 
     # ─── Parse rails ───────────────────────────────────────────
-    raw = [s.strip() for s in args.backend.split(",") if s.strip()]
+    raw = [s.strip() for s in backend.split(",") if s.strip()]
+    if not raw:
+        die("--backend is empty.")
     expanded: list[Rail] = []
     for tok in raw:
         if tok in RAIL_ALIASES:
@@ -499,20 +540,19 @@ def main() -> None:
             try:
                 expanded.append(Rail(tok))
             except ValueError:
-                raise SystemExit(
-                    f"Unknown backend: {tok!r}. Valid: {Rail.values() + list(RAIL_ALIASES)}"
-                )
+                valid = ", ".join(Rail.values() + list(RAIL_ALIASES))
+                die(f"unknown backend [bold]{tok}[/]. Valid: {valid}")
     selected = _dedup(expanded)
 
     gpu_sel = [r for r in selected if r in GPU_RAILS]
     cpu_sel = [r for r in selected if r in CPU_RAILS]
     if len(gpu_sel) > 1:
-        raise SystemExit("Pick at most one of {mps, mlx}.")
+        die("pick at most one of [bold]mps[/], [bold]mlx[/].")
     if len(cpu_sel) > 1:
-        raise SystemExit("Pick at most one of {cpu-neon, cpu-sme}.")
+        die("pick at most one of [bold]cpu-neon[/], [bold]cpu-sme[/].")
     is_combined = len(selected) > 1
     if is_combined and Rail.CPU_SME in cpu_sel:
-        raise SystemExit("`cpu-sme` (AMX/SME) is single-rail only — use `cpu-neon`.")
+        die("[bold]cpu-sme[/] (AMX/SME) is single-rail only — use [bold]cpu-neon[/].")
 
     # ─── Single-rail backends ──────────────────────────────────
     sample: Any = None
@@ -522,12 +562,12 @@ def main() -> None:
         import torch
 
         if not torch.backends.mps.is_available():
-            raise SystemExit("MPS not available.")
+            die("MPS not available.")
         dt = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}[
-            args.dtype
+            dtype_str
         ]
         dev = torch.device("mps")
-        console.print(f"[dim]MPS: {n_size}² {args.dtype}[/]")
+        console.print(f"[dim]MPS: {n_size}² {dtype_str}[/]")
         a = torch.randn(n_size, n_size, device=dev, dtype=dt)
         b = torch.randn(n_size, n_size, device=dev, dtype=dt)
         c = torch.empty(n_size, n_size, device=dev, dtype=dt)
@@ -542,13 +582,13 @@ def main() -> None:
             torch.mps.synchronize()
             return batch * flops_per_matmul, time.perf_counter() - t0
 
-        dtype_label = f"MPS torch.{args.dtype} {n_size}²"
+        dtype_label = f"MPS torch.{dtype_str} {n_size}²"
 
     elif not is_combined and selected[0] is Rail.MLX:
         import mlx.core as mx
 
-        dm = {"fp32": mx.float32, "fp16": mx.float16, "bf16": mx.bfloat16}[args.dtype]
-        console.print(f"[dim]MLX: {n_size}² {args.dtype}[/]")
+        dm = {"fp32": mx.float32, "fp16": mx.float16, "bf16": mx.bfloat16}[dtype_str]
+        console.print(f"[dim]MLX: {n_size}² {dtype_str}[/]")
         a = mx.random.normal((n_size, n_size)).astype(dm)
         b = mx.random.normal((n_size, n_size)).astype(dm)
         mx.eval(a, b)
@@ -563,7 +603,7 @@ def main() -> None:
             mx.eval(x)
             return batch * flops_per_matmul, time.perf_counter() - t0
 
-        dtype_label = f"MLX {args.dtype} {n_size}²"
+        dtype_label = f"MLX {dtype_str} {n_size}²"
 
     elif not is_combined and selected[0] is Rail.CPU_SME:
         import os
@@ -573,9 +613,9 @@ def main() -> None:
         nt = os.cpu_count() or 8
         torch.set_num_threads(nt)
         dt = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}[
-            args.dtype
+            dtype_str
         ]
-        console.print(f"[dim]CPU SME/AMX: {n_size}² {args.dtype} ×{nt} threads[/]")
+        console.print(f"[dim]CPU SME/AMX: {n_size}² {dtype_str} ×{nt} threads[/]")
         a = torch.randn(n_size, n_size, dtype=dt)
         b = torch.randn(n_size, n_size, dtype=dt)
         c = torch.empty(n_size, n_size, dtype=dt)
@@ -588,20 +628,20 @@ def main() -> None:
                 torch.matmul(a, b, out=c)
             return batch * flops_per_matmul, time.perf_counter() - t0
 
-        dtype_label = f"CPU SME {args.dtype} ×{nt}"
+        dtype_label = f"CPU SME {dtype_str} ×{nt}"
 
     elif not is_combined and selected[0] is Rail.CPU_NEON:
         import multiprocessing as mp
         import os
 
-        nw = args.workers if args.workers > 0 else (os.cpu_count() or 8)
+        nw = workers if workers > 0 else (os.cpu_count() or 8)
         console.print(f"[dim]CPU-NEON: {nw} workers[/]")
         ctx = mp.get_context("spawn")
         counter: Any = ctx.Value("q", 0)
         stop_flag: Any = ctx.Value("b", 0)
         neon_procs = [
             ctx.Process(
-                target=_cpu_neon_worker, args=(counter, stop_flag, args.dtype, 4096)
+                target=_cpu_neon_worker, args=(counter, stop_flag, dtype_str, 4096)
             )
             for _ in range(nw)
         ]
@@ -625,7 +665,7 @@ def main() -> None:
                     p.terminate()
                     p.join(timeout=1)
 
-        dtype_label = f"CPU NEON {args.dtype} ({nw} workers)"
+        dtype_label = f"CPU NEON {dtype_str} ({nw} workers)"
 
     elif not is_combined and selected[0] is Rail.ANE:
         import numpy as np
@@ -658,12 +698,12 @@ def main() -> None:
             import torch
 
             if not torch.backends.mps.is_available():
-                raise SystemExit("MPS not available.")
+                die("MPS not available.")
             dt = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}[
-                args.dtype
+                dtype_str
             ]
             dev = torch.device("mps")
-            console.print(f"[dim]GPU (MPS): {n_size}² {args.dtype}[/]")
+            console.print(f"[dim]GPU (MPS): {n_size}² {dtype_str}[/]")
             a = torch.randn(n_size, n_size, device=dev, dtype=dt)
             b = torch.randn(n_size, n_size, device=dev, dtype=dt)
             c = torch.empty(n_size, n_size, device=dev, dtype=dt)
@@ -681,9 +721,9 @@ def main() -> None:
             import mlx.core as mx
 
             dm = {"fp32": mx.float32, "fp16": mx.float16, "bf16": mx.bfloat16}[
-                args.dtype
+                dtype_str
             ]
-            console.print(f"[dim]GPU (MLX): {n_size}² {args.dtype}[/]")
+            console.print(f"[dim]GPU (MLX): {n_size}² {dtype_str}[/]")
             a = mx.random.normal((n_size, n_size)).astype(dm)
             b = mx.random.normal((n_size, n_size)).astype(dm)
             mx.eval(a, b)
@@ -707,14 +747,14 @@ def main() -> None:
         last_ane = [0]
 
         if has_cpu:
-            nw = args.workers if args.workers > 0 else (os.cpu_count() or 8)
+            nw = workers if workers > 0 else (os.cpu_count() or 8)
             console.print(f"[dim]CPU: {nw} NEON workers[/]")
             cpu_counter = ctx.Value("q", 0)
             for _ in range(nw):
                 procs.append(
                     ctx.Process(
                         target=_cpu_neon_worker,
-                        args=(cpu_counter, stop_flag, args.dtype, 4096),
+                        args=(cpu_counter, stop_flag, dtype_str, 4096),
                     )
                 )
 
@@ -772,7 +812,7 @@ def main() -> None:
         sample.breakdown = breakdown  # type: ignore[attr-defined,unused-ignore]
         parts: list[str] = []
         if gpu_rail is not None:
-            parts.append(f"{gpu_rail.value.upper()} {n_size}² {args.dtype}")
+            parts.append(f"{gpu_rail.value.upper()} {n_size}² {dtype_str}")
         if has_cpu:
             parts.append(f"{nw}× NEON")
         if has_ane:
@@ -789,13 +829,19 @@ def main() -> None:
     first_window_avg: float | None = None
 
     log_f = None
-    if args.log:
-        log_f = open(args.log, "w", buffering=1)
+    if log is not None:
+        try:
+            log_f = log.open("w", buffering=1)
+        except OSError as e:
+            # Workers are already running by this point; don't strand them.
+            cleanup()
+            power.stop()
+            die(f"cannot open log {log}: {e.strerror}")
         log_f.write(
             "elapsed_s,total_tflops,gpu_tflops,cpu_tflops,ane_tflops,"
             "cpu_w,gpu_w,ane_w,total_w,tflops_per_w\n"
         )
-        console.print(f"[dim]log → {args.log}[/]")
+        console.print(f"[dim]log → {log}[/]")
 
     bd: dict[str, float] | None = getattr(sample, "breakdown", None)
 
@@ -883,4 +929,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    app()
