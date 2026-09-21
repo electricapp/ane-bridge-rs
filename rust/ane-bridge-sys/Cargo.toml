@@ -27,4 +27,4 @@ crate-type = ["rlib"]
 workspace = true
 
 [build-dependencies]
-cc = "1.2"
+cc = "1.4"
