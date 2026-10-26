@@ -682,6 +682,33 @@ impl Graph {
         self.has_raw_stmts = true;
     }
 
+    /// Emit an op the builder has no helper for and get back a typed [`Val`]
+    /// that builder ops can consume.
+    ///
+    /// `emit` receives the minted SSA name of the result and returns the MIL
+    /// text: any attribute `const` statements it needs (named from the result
+    /// name so they stay unique) followed by the op statement binding the
+    /// result, typed `dtype`/`shape`. Unlike [`Graph::raw_stmt`], the op is
+    /// recorded with its tensor operands `reads`, so [`Graph::traffic`] prices
+    /// it and the dead-op check in [`Graph::finish`] still applies.
+    pub fn raw_op<F: FnOnce(&str) -> String>(
+        &mut self,
+        prefix: &str,
+        dtype: Dtype,
+        shape: &[i64],
+        reads: &[&Val],
+        emit: F,
+    ) -> Val {
+        let out = Val {
+            name: self.fresh(prefix),
+            dtype,
+            shape: shape.to_vec(),
+        };
+        self.stmts.push(emit(&out.name));
+        self.note(&out, reads);
+        out
+    }
+
     /// Panic if any emitted op's result is unreachable from `outputs`.
     ///
     /// The framework compiles dead subgraphs rather than pruning them, and
