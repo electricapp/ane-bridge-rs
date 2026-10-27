@@ -48,7 +48,7 @@ jobs:
           persist-credentials: false
 
       # ----- Python (for the identity-model generator script) -----
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11.9"
 
@@ -59,7 +59,7 @@ jobs:
         run: python3 -m pip install "typer==0.23.2" "rich==15.0.0"
 
       # ----- Rust toolchain -----
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1 rolling tag; this SHA is the pin
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 rolling tag; this SHA is the pin
         with:
           toolchain: 1.98.1
           components: clippy, rustfmt
@@ -177,7 +177,7 @@ jobs:
           persist-credentials: false
 
       # ----- Python (for the identity-model generator script) -----
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11.9"
 
@@ -188,7 +188,7 @@ jobs:
         run: python3 -m pip install "typer==0.23.2" "rich==15.0.0"
 
       # ----- Rust toolchain -----
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1 rolling tag; this SHA is the pin
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1 rolling tag; this SHA is the pin
         with:
           toolchain: 1.98.1
           components: clippy, rustfmt
@@ -380,7 +380,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install cargo-machete
-        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2.85.13
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-machete
       - name: Check for unused dependencies
